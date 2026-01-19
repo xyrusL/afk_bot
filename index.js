@@ -44,7 +44,7 @@ const CONFIG = {
 // ============================================================
 
 const mineflayer = require('mineflayer')
-const autoEat = require('mineflayer-auto-eat').plugin
+const autoEat = require('mineflayer-auto-eat').loader
 
 let isAfk = false
 
@@ -115,7 +115,32 @@ function getEdibleInventorySummary(bot) {
 
 const EAT_COOLDOWN_MS = 4000
 
+// Global reconnect state - ensures only ONE reconnection timer and ONE bot instance
+let reconnectTimer = null
+let currentBot = null
+
+function scheduleReconnect(delay = CONFIG.reconnectDelay) {
+    if (reconnectTimer) return // Already scheduled
+
+    const logger = createStatusLogger()
+    logger.log('reconnect', `Reconnecting in ${delay / 1000}s...`, CONFIG.logThrottleMs.connection)
+
+    reconnectTimer = setTimeout(() => {
+        reconnectTimer = null
+        createBot()
+    }, delay)
+}
+
 function createBot() {
+    // Clean up any existing bot
+    if (currentBot) {
+        try {
+            currentBot.removeAllListeners()
+            currentBot.quit()
+        } catch (e) { /* ignore */ }
+        currentBot = null
+    }
+
     const logger = createStatusLogger()
     logger.log('connect', `Connecting to ${CONFIG.host}:${CONFIG.port} as ${CONFIG.username}...`, CONFIG.logThrottleMs.connection)
 
@@ -124,6 +149,7 @@ function createBot() {
         port: CONFIG.port,
         username: CONFIG.username
     })
+    currentBot = bot
 
     // Load auto-eat plugin
     bot.loadPlugin(autoEat)
@@ -279,22 +305,27 @@ function createBot() {
 
 
     bot.on('kicked', (reason) => {
-        logger.log('kicked', `Kicked: ${reason}`, 0)
-        logger.log('reconnect', `Reconnecting in ${CONFIG.reconnectDelay / 1000}s...`, CONFIG.logThrottleMs.connection)
-        setTimeout(createBot, CONFIG.reconnectDelay)
+        const reasonStr = JSON.stringify(reason)
+        logger.log('kicked', `Kicked: ${reasonStr}`, 0)
+
+        // If throttled, wait longer (e.g. 10 seconds)
+        if (reasonStr.toLowerCase().includes('throttl')) {
+            scheduleReconnect(10000)
+        } else {
+            scheduleReconnect()
+        }
     })
 
     bot.on('error', (err) => {
         logger.log('error', `Error: ${err.message}`, 0)
-        logger.log('reconnect', `Reconnecting in ${CONFIG.reconnectDelay / 1000}s...`, CONFIG.logThrottleMs.connection)
-        setTimeout(createBot, CONFIG.reconnectDelay)
+        scheduleReconnect()
     })
 
     bot.on('end', (reason) => {
         logger.log('end', `Disconnected: ${reason}`, 0)
-        logger.log('reconnect', `Reconnecting in ${CONFIG.reconnectDelay / 1000}s...`, CONFIG.logThrottleMs.connection)
-        setTimeout(createBot, CONFIG.reconnectDelay)
+        scheduleReconnect()
     })
 }
 
 createBot()
+
