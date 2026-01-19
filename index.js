@@ -85,44 +85,50 @@ function createBot() {
         }, CONFIG.afkDelay)
     })
 
-    // When bot starts eating
+    // Health monitoring - eat if low health (but don't call if already eating!)
+    let isEating = false;
+
     bot.on('autoeat_started', () => {
-        console.log('Bot is eating...')
+        console.log('Bot is eating...');
+        isEating = true;
         if (isAfk) {
-            isAfk = false
+            isAfk = false;
         }
-    })
+    });
 
-    // When bot finishes eating
     bot.on('autoeat_finished', () => {
-        console.log('Bot finished eating.')
-        // Go back to /afk after eating
+        console.log('Bot finished eating.');
+        isEating = false;
         setTimeout(() => {
-            bot.chat('/afk')
-            console.log('Returned to /afk after eating.')
-            isAfk = true
-        }, 1000)
-    })
+            bot.chat('/afk');
+            console.log('Returned to /afk after eating.');
+            isAfk = true;
+        }, 1000);
+    });
 
-    // When bot stops eating (no food or error)
     bot.on('autoeat_stopped', () => {
-        console.log('Bot stopped eating (no food or full).')
+        console.log('Bot stopped eating (no food or full).');
+        isEating = false;
         if (!isAfk) {
             setTimeout(() => {
-                bot.chat('/afk')
-                console.log('Returned to /afk.')
-                isAfk = true
-            }, 1000)
+                bot.chat('/afk');
+                console.log('Returned to /afk.');
+                isAfk = true;
+            }, 1000);
         }
-    })
+    });
 
-    // Health monitoring - eat if low health
     bot.on('health', () => {
-        if (bot.health < CONFIG.healthThreshold && bot.food < 20) {
-            console.log(`Low health (${bot.health}), trying to eat...`)
-            bot.autoEat.eat()
+        // Only try to eat if NOT already eating
+        if (bot.health < CONFIG.healthThreshold && bot.food < 20 && !isEating) {
+            console.log(`Low health (${bot.health.toFixed(1)}), trying to eat...`);
+            try {
+                bot.autoEat.eat();
+            } catch (err) {
+                // Ignore "Already eating" errors
+            }
         }
-    })
+    });
 
     // Pick up only food items
     bot.on('itemDrop', (entity) => {
