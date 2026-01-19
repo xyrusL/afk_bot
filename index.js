@@ -11,7 +11,7 @@ const CONFIG = {
     port: 62782,
 
     // Bot username (this is what the bot will be called in-game)
-    username: 'AFKBot',
+    username: '_AfkBot',
 
     // Delay in milliseconds before sending /afk after spawning (3000 = 3 seconds)
     afkDelay: 3000,
