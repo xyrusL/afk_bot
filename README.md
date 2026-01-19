@@ -7,6 +7,13 @@ Edit `index.js` to change:
 - Server IP (`host`)
 - Port (`port`)
 - Bot Username (`username`)
+- Hunger/Health thresholds
+
+## Features
+- **Auto-AFK**: Runs `/afk` automatically.
+- **Auto-Reconnect**: Reconnects on kick or error.
+- **Hunger Management**: Eats food when hungry (<14) or low health (<10).
+- **Smart Pickup**: Picks up only food items thrown nearby.
 
 ## How to Run (PC)
 1. Install [Node.js](https://nodejs.org/).
@@ -20,21 +27,17 @@ Edit `index.js` to change:
 
 If you downloaded the code as a ZIP file:
 
-1.  **Install Termux** from F-Droid or GitHub (Play Store version is outdated).
+1.  **Install Termux** from F-Droid or GitHub.
 2.  Open Termux and run these commands to prepare the environment:
     ```bash
     pkg update && pkg upgrade -y
     pkg install nodejs -y
     ```
-3.  Navigate to your download folder.
-    - If you are not sure where it is, you might need to grant storage permission first:
-      ```bash
-      termux-setup-storage
-      ```
-    - Then go to the folder (example if in Downloads):
-      ```bash
-      cd storage/downloads/afk_bot
-      ```
+3.  Navigate to your download folder:
+    ```bash
+    termux-setup-storage
+    cd storage/downloads/afk_bot
+    ```
 4.  Install the bot dependencies:
     ```bash
     npm install
@@ -43,3 +46,28 @@ If you downloaded the code as a ZIP file:
     ```bash
     npm start
     ```
+
+---
+
+## How to Update
+
+If the bot has been updated in the repository, here is how to get the latest version suitable for your setup:
+
+### Option 1: Using Git (Recommended)
+If you used `git clone` to install the bot, simply run:
+```bash
+git pull
+npm install
+```
+
+### Option 2: Re-downloading (ZIP Users)
+If you downloaded the ZIP file:
+1. Download the latest ZIP from the repository.
+2. Extract the files.
+3. **Copy your configured `index.js`** (or just copy your settings) from the old folder to the new one so you don't lose your settings.
+4. Replace the old files with the new ones.
+5. In your terminal/Termux, run:
+   ```bash
+   npm install
+   ```
+   (This updates any new dependencies like the auto-eat plugin).
