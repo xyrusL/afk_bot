@@ -47,6 +47,31 @@ If you downloaded the code as a ZIP file:
     npm start
     ```
 
+### Option 2: Using wget (Direct Download)
+If you prefer not to use git:
+
+1.  **Install wget and unzip**:
+    ```bash
+    pkg install wget unzip -y
+    ```
+2.  **Download the bot** (replace URL with your repo's zip link):
+    ```bash
+    wget https://github.com/YOUR_USERNAME/YOUR_REPO_NAME/archive/refs/heads/main.zip -O afk_bot.zip
+    ```
+3.  **Unzip and move to internal storage**:
+    It is best to keep files in Termux's home directory to avoid permission issues.
+    ```bash
+    unzip afk_bot.zip
+    mv YOUR_REPO_NAME-main afk_bot
+    rm afk_bot.zip
+    ```
+4.  **Install and Run**:
+    ```bash
+    cd afk_bot
+    npm install
+    npm start
+    ```
+
 ---
 
 ## How to Update
