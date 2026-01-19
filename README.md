@@ -10,10 +10,10 @@ Edit `index.js` to change:
 - Hunger/Health thresholds
 
 ## Features
-- **Auto-AFK**: Runs `/afk` automatically.
+- **Auto-AFK**: Runs `/afk` automatically after spawning.
 - **Auto-Reconnect**: Reconnects on kick or error.
-- **Hunger Management**: Eats food when hungry (<14) or low health (<10).
-- **Smart Pickup**: Picks up only food items thrown nearby.
+- **Hunger Management**: Eats from the bot's inventory when hunger is at or below 50% (food ≤ 10) or when health is low (<= configured health threshold) and the bot can eat.
+    - The bot no longer detects or moves toward dropped food.
 
 ## How to Run (PC)
 1. Install [Node.js](https://nodejs.org/).

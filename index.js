@@ -19,8 +19,8 @@ const CONFIG = {
     // Delay in milliseconds before reconnecting after being kicked (3000 = 3 seconds)
     reconnectDelay: 3000,
 
-    // Hunger threshold to start eating (max is 20, start eating when below this)
-    hungerThreshold: 14,
+    // Hunger threshold to start eating (max is 20). 50% hunger = 10.
+    hungerThreshold: 10,
 
     // Health threshold to eat even if not hungry (max is 20)
     healthThreshold: 10
@@ -33,24 +33,9 @@ const CONFIG = {
 const mineflayer = require('mineflayer')
 const autoEat = require('mineflayer-auto-eat').plugin
 
-// List of food item names in Minecraft
-const FOOD_ITEMS = [
-    'apple', 'baked_potato', 'beef', 'beetroot', 'beetroot_soup', 'bread',
-    'carrot', 'chicken', 'chorus_fruit', 'cod', 'cooked_beef', 'cooked_chicken',
-    'cooked_cod', 'cooked_mutton', 'cooked_porkchop', 'cooked_rabbit', 'cooked_salmon',
-    'cookie', 'dried_kelp', 'enchanted_golden_apple', 'golden_apple', 'golden_carrot',
-    'honey_bottle', 'melon_slice', 'mushroom_stew', 'mutton', 'poisonous_potato',
-    'porkchop', 'potato', 'pufferfish', 'pumpkin_pie', 'rabbit', 'rabbit_stew',
-    'raw_beef', 'raw_chicken', 'raw_cod', 'raw_mutton', 'raw_porkchop', 'raw_rabbit',
-    'raw_salmon', 'rotten_flesh', 'salmon', 'spider_eye', 'steak', 'suspicious_stew',
-    'sweet_berries', 'tropical_fish', 'glow_berries'
-]
-
-function isFood(itemName) {
-    return FOOD_ITEMS.some(food => itemName.toLowerCase().includes(food.replace('_', '')))
-}
-
 let isAfk = false
+
+const EAT_COOLDOWN_MS = 4000
 
 function createBot() {
     console.log(`Connecting to ${CONFIG.host}:${CONFIG.port} as ${CONFIG.username}...`)
@@ -78,6 +63,11 @@ function createBot() {
             bannedFood: ['rotten_flesh', 'spider_eye', 'poisonous_potato', 'pufferfish']
         }
 
+        // Ensure auto-eat is enabled
+        if (typeof bot.autoEat.enable === 'function') {
+            bot.autoEat.enable()
+        }
+
         setTimeout(() => {
             bot.chat('/afk')
             console.log('Chatted: /afk')
@@ -87,6 +77,25 @@ function createBot() {
 
     // Health monitoring - eat if low health (but don't call if already eating!)
     let isEating = false;
+    let lastEatAttemptAt = 0;
+
+    function tryEat(reason) {
+        const now = Date.now()
+        if (isEating) return
+        if (now - lastEatAttemptAt < EAT_COOLDOWN_MS) return
+        if (bot.food >= 20) {
+            // Can't eat when full hunger on most servers
+            return
+        }
+
+        lastEatAttemptAt = now
+        console.log(`${reason} Trying to eat from inventory... (health=${bot.health.toFixed(1)}, food=${bot.food})`)
+        try {
+            bot.autoEat.eat()
+        } catch (err) {
+            // Ignore "Already eating" and similar transient errors
+        }
+    }
 
     bot.on('autoeat_started', () => {
         console.log('Bot is eating...');
@@ -100,9 +109,11 @@ function createBot() {
         console.log('Bot finished eating.');
         isEating = false;
         setTimeout(() => {
-            bot.chat('/afk');
-            console.log('Returned to /afk after eating.');
-            isAfk = true;
+            if (!isAfk) {
+                bot.chat('/afk');
+                console.log('Returned to /afk after eating.');
+                isAfk = true;
+            }
         }, 1000);
     });
 
@@ -118,36 +129,26 @@ function createBot() {
         }
     });
 
+    bot.on('autoeat_error', (err) => {
+        const msg = err && err.message ? err.message : String(err)
+        console.log(`Auto-eat error: ${msg}`)
+        isEating = false
+    })
+
     bot.on('health', () => {
-        // Only try to eat if NOT already eating
-        if (bot.health < CONFIG.healthThreshold && bot.food < 20 && !isEating) {
-            console.log(`Low health (${bot.health.toFixed(1)}), trying to eat...`);
-            try {
-                bot.autoEat.eat();
-            } catch (err) {
-                // Ignore "Already eating" errors
-            }
+        // Requirements:
+        // - If hunger <= 50% (food <= 10), eat
+        // - Or if low health and can eat, eat
+        if (bot.food <= CONFIG.hungerThreshold) {
+            tryEat(`[HUNGER<=${CONFIG.hungerThreshold}]`)
+            return
+        }
+
+        if (bot.health <= CONFIG.healthThreshold) {
+            tryEat(`[LOW_HEALTH<=${CONFIG.healthThreshold}]`)
         }
     });
 
-    // Pick up only food items
-    bot.on('itemDrop', (entity) => {
-        if (!entity || !entity.getDroppedItem) return
-
-        const item = entity.getDroppedItem()
-        if (!item) return
-
-        const itemName = item.name
-        if (isFood(itemName)) {
-            console.log(`Food item detected nearby: ${itemName}. Picking it up...`)
-            // Move to pick up the food
-            bot.pathfinder && bot.pathfinder.goto
-                ? bot.pathfinder.goto(new (require('mineflayer-pathfinder').goals.GoalNear)(entity.position.x, entity.position.y, entity.position.z, 1))
-                : null
-        } else {
-            console.log(`Non-food item detected: ${itemName}. Ignoring.`)
-        }
-    })
 
     bot.on('kicked', (reason) => {
         console.log(`Kicked: ${reason}`)
