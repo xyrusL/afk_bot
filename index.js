@@ -5,7 +5,7 @@
 
 const CONFIG = {
     // Server IP address (e.g., 'play.example.com' or '127.0.0.1')
-    host: 'watermelon.deze.me',
+    host: '185.107.192.63',
 
     // Server port (default Minecraft port is 25565)
     port: 62782,
