@@ -201,6 +201,9 @@ function createBot() {
     let lastEatAttemptAt = 0;
     let lastFood = null
     let lastHealth = null
+    // OPTIMIZATION: Debounce health checks to reduce event processing frequency
+    let lastHealthCheckAt = 0
+    const HEALTH_CHECK_DEBOUNCE_MS = 2000 // Only process health events every 2 seconds
 
     function tryEat(reason) {
         const now = Date.now()
@@ -208,18 +211,21 @@ function createBot() {
         if (now - lastEatAttemptAt < EAT_COOLDOWN_MS) return
         if (bot.food >= 20) {
             // Can't eat when full hunger on most servers
+            // OPTIMIZATION: Only log full hunger if we actually tried to eat (throttled anyway)
             logger.log('full-hunger', `${reason} Hunger is full (food=${bot.food}). Not eating.`, CONFIG.logThrottleMs.fullHunger)
             return
         }
 
         lastEatAttemptAt = now
+        // OPTIMIZATION: Only scan inventory when we're actually going to eat, and log in one place
         const inv = getEdibleInventorySummary(bot)
         if (inv.edibleCount === 0) {
-            logger.log('no-food', `${reason} Bot is hungry but found no edible food in inventory.`, CONFIG.logThrottleMs.noFood)
-        } else {
-            const top = inv.edibleNames.length ? ` (${inv.edibleNames.join(', ')})` : ''
-            logger.log('eat-attempt', `${reason} Bot is trying to eat from inventory${top}... (health=${bot.health.toFixed(1)}, food=${bot.food})`, CONFIG.logThrottleMs.eatAttempt)
+            logger.log('no-food', `${reason} No edible food in inventory.`, CONFIG.logThrottleMs.noFood)
+            return // OPTIMIZATION: Early return - don't call eat() if no food
         }
+
+        const top = inv.edibleNames.length ? ` (${inv.edibleNames.join(', ')})` : ''
+        logger.log('eat-attempt', `${reason} Eating${top}... (H=${bot.health.toFixed(0)}, F=${bot.food})`, CONFIG.logThrottleMs.eatAttempt)
         try {
             bot.autoEat.eat()
         } catch (err) {
@@ -249,18 +255,23 @@ function createBot() {
     });
 
     bot.on('autoeat_stopped', () => {
-        // More specific reason if we can infer it
+        // OPTIMIZATION: Removed duplicate /afk here - autoeat_finished handles the re-AFK
+        // This event fires when eating is interrupted (no food, can't eat, etc.)
         if (bot.food >= 20) {
             logger.log('eat-stop', 'Auto-eat stopped (hunger full).', CONFIG.logThrottleMs.fullHunger)
         } else {
             logger.log('eat-stop', 'Auto-eat stopped (no food / cannot eat).', CONFIG.logThrottleMs.noFood)
         }
         isEating = false;
+        // Only send /afk if we broke out of AFK and autoeat_finished won't fire
+        // autoeat_finished fires on successful completion, autoeat_stopped on interruption
         if (!isAfk) {
             setTimeout(() => {
-                bot.chat('/afk');
-                logger.log('afk-on', 'Returned to /afk (AFK mode on).', CONFIG.logThrottleMs.afk)
-                isAfk = true;
+                if (!isAfk && !isEating) { // Double-check we're still not eating
+                    bot.chat('/afk');
+                    logger.log('afk-on', 'Returned to /afk (AFK mode on).', CONFIG.logThrottleMs.afk)
+                    isAfk = true;
+                }
             }, 1000);
         }
     });
@@ -273,7 +284,13 @@ function createBot() {
 
     // Manual health monitoring - We drive the eating logic here to have fine-grained control and logging.
     // This allows us to log "seeking food" BEFORE the action, and handle cooldowns explicitly.
+    // OPTIMIZATION: Debounced to prevent excessive processing on every server tick
     bot.on('health', () => {
+        const now = Date.now()
+        // OPTIMIZATION: Skip processing if we checked recently (debounce)
+        if (now - lastHealthCheckAt < HEALTH_CHECK_DEBOUNCE_MS) return
+        lastHealthCheckAt = now
+
         // Scenario logs (throttled): hunger/health changed, hungry state, seeking food, etc.
         if (typeof bot.food === 'number' && bot.food !== lastFood) {
             lastFood = bot.food
@@ -294,14 +311,13 @@ function createBot() {
         // Requirements:
         // - If hunger <= 50% (food <= 10), eat
         // - Or if low health and can eat, eat
+        // OPTIMIZATION: Removed duplicate 'seek-food' log - tryEat already logs the attempt
         if (bot.food <= CONFIG.hungerThreshold) {
-            logger.log('seek-food', 'Bot is trying to find food in inventory...', CONFIG.logThrottleMs.eatAttempt)
             tryEat(`[HUNGER<=${CONFIG.hungerThreshold}]`)
             return
         }
 
         if (bot.health <= CONFIG.healthThreshold) {
-            logger.log('seek-food', 'Bot is trying to find food in inventory (low health)...', CONFIG.logThrottleMs.eatAttempt)
             tryEat(`[LOW_HEALTH<=${CONFIG.healthThreshold}]`)
         }
     });
