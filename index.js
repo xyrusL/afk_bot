@@ -168,9 +168,10 @@ function createBot() {
             bannedFood: ['rotten_flesh', 'spider_eye', 'poisonous_potato', 'pufferfish']
         }
 
-        // Ensure auto-eat is enabled
-        if (typeof bot.autoEat.enable === 'function') {
-            bot.autoEat.enable()
+        // Disable built-in auto-eat listener to prevent conflict with our manual health listener below.
+        // We will call bot.autoEat.eat() manually when we decide it's time.
+        if (typeof bot.autoEat.disable === 'function') {
+            bot.autoEat.disable()
         }
 
         setTimeout(() => {
@@ -270,6 +271,8 @@ function createBot() {
         isEating = false
     })
 
+    // Manual health monitoring - We drive the eating logic here to have fine-grained control and logging.
+    // This allows us to log "seeking food" BEFORE the action, and handle cooldowns explicitly.
     bot.on('health', () => {
         // Scenario logs (throttled): hunger/health changed, hungry state, seeking food, etc.
         if (typeof bot.food === 'number' && bot.food !== lastFood) {
