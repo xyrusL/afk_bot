@@ -4,19 +4,17 @@
 // You can edit the settings below to customize the bot.
 
 const CONFIG = {
-    // Server IP address (e.g., 'play.example.com' or '127.0.0.1')
-    host: '185.107.192.63',
+    // Server hostname 
+    host: 'watermelon.deze.me',
 
-    // Server port (default Minecraft port is 25565)
-    port: 62782,
+    // Server port 
+    port: 25565,
 
-    // Bot username (this is what the bot will be called in-game)
+    // Bot username
     username: '_AfkBot',
 
-    // Minecraft version (e.g., '1.8.9', '1.12.2', '1.19.4').
     // Set to 'false' (or null) to auto-detect version.
-    // Specifying a version is recommended if auto-detection fails (e.g. "Unsupported protocol version").
-    version: '1.20.1',
+    version: false,
 
     // Delay in milliseconds before sending /afk after spawning (3000 = 3 seconds)
     afkDelay: 3000,
