@@ -13,6 +13,11 @@ const CONFIG = {
     // Bot username (this is what the bot will be called in-game)
     username: '_AfkBot',
 
+    // Minecraft version (e.g., '1.8.9', '1.12.2', '1.19.4').
+    // Set to 'false' (or null) to auto-detect version.
+    // Specifying a version is recommended if auto-detection fails (e.g. "Unsupported protocol version").
+    version: '1.20.1',
+
     // Delay in milliseconds before sending /afk after spawning (3000 = 3 seconds)
     afkDelay: 3000,
 
@@ -147,7 +152,8 @@ function createBot() {
     const bot = mineflayer.createBot({
         host: CONFIG.host,
         port: CONFIG.port,
-        username: CONFIG.username
+        username: CONFIG.username,
+        version: CONFIG.version || false
     })
     currentBot = bot
 
