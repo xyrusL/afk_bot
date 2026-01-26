@@ -5,6 +5,7 @@
 
 const CONFIG = {
     // Server hostname 
+    
     host: 'watermelon.deze.me',
 
     // Server port 
@@ -61,49 +62,9 @@ const mineflayer = require('mineflayer')
 const autoEat = require('mineflayer-auto-eat').loader
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder')
 const { GoalNear } = goals
+const { createLogger } = require('./logger')
 
 let isAfk = false
-
-function createStatusLogger() {
-    const lastByKey = new Map()
-    function stamp() {
-        const d = new Date()
-        const hh = String(d.getHours()).padStart(2, '0')
-        const mm = String(d.getMinutes()).padStart(2, '0')
-        const ss = String(d.getSeconds()).padStart(2, '0')
-        return `${hh}:${mm}:${ss}`
-    }
-
-    /**
-     * Logs a message, with optional de-dupe & throttling per key.
-     * If repeats are suppressed, the next emitted log will include the suppressed count.
-     */
-    function log(key, message, minIntervalMs = 0) {
-        const now = Date.now()
-        const prev = key ? lastByKey.get(key) : undefined
-        if (key && prev) {
-            const within = minIntervalMs > 0 && (now - prev.lastAt) < minIntervalMs
-            const same = prev.lastMessage === message
-            if (within && same) {
-                prev.suppressed += 1
-                lastByKey.set(key, prev)
-                return
-            }
-        }
-
-        let suffix = ''
-        if (key && prev && prev.suppressed > 0) {
-            suffix = ` (suppressed ${prev.suppressed} repeats)`
-        }
-
-        if (key) {
-            lastByKey.set(key, { lastAt: now, lastMessage: message, suppressed: 0 })
-        }
-        console.log(`[${stamp()}] ${message}${suffix}`)
-    }
-
-    return { log }
-}
 
 function getEdibleInventorySummary(bot) {
     const items = bot.inventory?.items?.() ?? []
@@ -175,7 +136,7 @@ let currentBot = null
 function scheduleReconnect(delay = CONFIG.reconnectDelay) {
     if (reconnectTimer) return // Already scheduled
 
-    const logger = createStatusLogger()
+    const logger = createLogger({ name: 'AFK' })
     logger.log('reconnect', `Reconnecting in ${delay / 1000}s...`, CONFIG.logThrottleMs.connection)
 
     reconnectTimer = setTimeout(() => {
@@ -194,7 +155,7 @@ function createBot() {
         currentBot = null
     }
 
-    const logger = createStatusLogger()
+    const logger = createLogger({ name: 'AFK' })
     logger.log('connect', `Connecting to ${CONFIG.host}:${CONFIG.port} as ${CONFIG.username}...`, CONFIG.logThrottleMs.connection)
 
     const bot = mineflayer.createBot({
@@ -292,6 +253,7 @@ function createBot() {
                     count: 64
                 }) || []
             }
+            logger.debug('chest-scan', `Chest scan: found ${cachedChestPositions.length} chests within ${CONFIG.chestScanRadius} blocks.`, CONFIG.chestScanIntervalMs)
         }
         return cachedChestPositions
     }
@@ -336,6 +298,7 @@ function createBot() {
         const chest = await bot.openChest(chestBlock)
         try {
             const items = typeof chest.containerItems === 'function' ? chest.containerItems() : chest.items()
+            logger.debug('chest-items', `Chest items: ${items.length} total.`, CONFIG.logThrottleMs.noFood)
             const pick = pickChestFoodItem(bot, items)
             if (!pick) return false
             await chest.withdraw(pick.type, pick.metadata, 1)
@@ -457,6 +420,7 @@ function createBot() {
 
         const top = inv.edibleNames.length ? ` (${inv.edibleNames.join(', ')})` : ''
         logger.log('eat-attempt', `${reason} Eating${top}... (H=${bot.health.toFixed(0)}, F=${bot.food})`, CONFIG.logThrottleMs.eatAttempt)
+        logger.debug('inv-food', `Inventory edible summary: count=${inv.edibleCount}${top}`, CONFIG.logThrottleMs.eatAttempt)
         try {
             bot.autoEat.eat()
         } catch (err) {
