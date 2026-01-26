@@ -31,6 +31,17 @@ const CONFIG = {
     // Terminal status heartbeat (prints a compact status line periodically)
     statusIntervalMs: 60000,
 
+    // Chest seeking (food) behavior
+    enableChestSeek: true,
+    chestScanRadius: 24,
+    chestScanIntervalMs: 5000,
+    chestEmptyCooldownMs: 300000,
+    chestUnreachableCooldownMs: 120000,
+    seekCooldownMs: 60000,
+    maxSeekDurationMs: 45000,
+    wanderStepBlocks: 10,
+    returnAfkDelayMs: 3000,
+
     // Minimum time between repeated logs of the same kind
     logThrottleMs: {
         hunger: 30000,
@@ -48,6 +59,8 @@ const CONFIG = {
 
 const mineflayer = require('mineflayer')
 const autoEat = require('mineflayer-auto-eat').loader
+const { pathfinder, Movements, goals } = require('mineflayer-pathfinder')
+const { GoalNear } = goals
 
 let isAfk = false
 
@@ -116,6 +129,43 @@ function getEdibleInventorySummary(bot) {
     return { edibleCount: edible.length, edibleNames }
 }
 
+function isEdibleItemName(bot, name) {
+    const foodsByName = bot.registry && bot.registry.foodsByName ? bot.registry.foodsByName : null
+    if (!foodsByName) return false
+    const banned = new Set(bot.autoEat?.options?.bannedFood ?? [])
+    return Boolean(foodsByName[name] && !banned.has(name))
+}
+
+function pickChestFoodItem(bot, chestItems) {
+    for (const item of chestItems) {
+        if (isEdibleItemName(bot, item.name) && item.count > 1) {
+            return item
+        }
+    }
+    return null
+}
+
+function posKey(pos) {
+    return `${pos.x},${pos.y},${pos.z}`
+}
+
+function distanceSq(a, b) {
+    const dx = a.x - b.x
+    const dy = a.y - b.y
+    const dz = a.z - b.z
+    return dx * dx + dy * dy + dz * dz
+}
+
+function withTimeout(promise, ms, label) {
+    let timeoutId
+    const timeout = new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+            reject(new Error(label || 'timeout'))
+        }, ms)
+    })
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId))
+}
+
 const EAT_COOLDOWN_MS = 4000
 
 // Global reconnect state - ensures only ONE reconnection timer and ONE bot instance
@@ -157,6 +207,7 @@ function createBot() {
 
     // Load auto-eat plugin
     bot.loadPlugin(autoEat)
+    bot.loadPlugin(pathfinder)
 
     bot.on('login', () => {
         logger.log('login', 'Bot has logged in.', CONFIG.logThrottleMs.connection)
@@ -164,6 +215,16 @@ function createBot() {
 
     bot.on('spawn', () => {
         logger.log('spawn', `Bot spawned. Waiting ${CONFIG.afkDelay / 1000}s to send /afk...`, CONFIG.logThrottleMs.connection)
+
+        if (!homePos) {
+            homePos = bot.entity.position.clone()
+            logger.log('home-set', `Home position set at ${homePos.x.toFixed(1)}, ${homePos.y.toFixed(1)}, ${homePos.z.toFixed(1)}.`, 0)
+        }
+
+        if (!movements) {
+            movements = new Movements(bot, bot.registry)
+            bot.pathfinder.setMovements(movements)
+        }
 
         // Configure auto-eat
         bot.autoEat.options = {
@@ -194,7 +255,7 @@ function createBot() {
             const afkText = isAfk ? 'AFK' : 'ACTIVE'
             const food = typeof bot.food === 'number' ? bot.food : '?'
             const health = typeof bot.health === 'number' ? bot.health.toFixed(1) : '?'
-            logger.log('heartbeat', `Status: ${afkText} | health=${health} | food=${food} | eating=${isEating ? 'yes' : 'no'}`)
+            logger.log('heartbeat', `Status: ${afkText} | health=${health} | food=${food} | eating=${isEating ? 'yes' : 'no'} | seeking=${seekInProgress ? 'yes' : 'no'}`)
         }, Math.max(5000, Math.min(CONFIG.statusIntervalMs, 60000)))
 
         bot.once('end', () => clearInterval(statusTimer))
@@ -202,12 +263,174 @@ function createBot() {
 
     // Health monitoring - eat if low health (but don't call if already eating!)
     let isEating = false;
+    let seekInProgress = false
+    let seekCooldownUntil = 0
+    let seekStartPos = null
+    let homePos = null
+    let movements = null
+    let lastChestScanAt = 0
+    let cachedChestPositions = []
+    const chestMemory = new Map()
     let lastEatAttemptAt = 0;
     let lastFood = null
     let lastHealth = null
     // OPTIMIZATION: Debounce health checks to reduce event processing frequency
     let lastHealthCheckAt = 0
     const HEALTH_CHECK_DEBOUNCE_MS = 2000 // Only process health events every 2 seconds
+
+    function getNearbyChests() {
+        const now = Date.now()
+        if (now - lastChestScanAt >= CONFIG.chestScanIntervalMs) {
+            lastChestScanAt = now
+            const chestId = bot.registry.blocksByName.chest?.id
+            if (typeof chestId !== 'number') {
+                cachedChestPositions = []
+            } else {
+                cachedChestPositions = bot.findBlocks({
+                    matching: chestId,
+                    maxDistance: CONFIG.chestScanRadius,
+                    count: 64
+                }) || []
+            }
+        }
+        return cachedChestPositions
+    }
+
+    function markChest(pos, key, ms) {
+        const k = posKey(pos)
+        const now = Date.now()
+        const info = chestMemory.get(k) || { pos }
+        if (key === 'emptyUntil') info.emptyUntil = now + ms
+        if (key === 'unreachableUntil') info.unreachableUntil = now + ms
+        chestMemory.set(k, info)
+    }
+
+    function isChestUsable(pos) {
+        const info = chestMemory.get(posKey(pos))
+        const now = Date.now()
+        if (!info) return true
+        if (info.emptyUntil && now < info.emptyUntil) return false
+        if (info.unreachableUntil && now < info.unreachableUntil) return false
+        return true
+    }
+
+    async function gotoNear(pos, range, timeoutMs, label) {
+        const goal = new GoalNear(pos.x, pos.y, pos.z, range)
+        await withTimeout(bot.pathfinder.goto(goal), timeoutMs, label)
+    }
+
+    async function wanderStep() {
+        const dx = Math.floor(Math.random() * (CONFIG.wanderStepBlocks * 2 + 1)) - CONFIG.wanderStepBlocks
+        const dz = Math.floor(Math.random() * (CONFIG.wanderStepBlocks * 2 + 1)) - CONFIG.wanderStepBlocks
+        const target = bot.entity.position.offset(dx || 1, 0, dz || -1)
+        try {
+            await gotoNear(target, 1, 10000, 'wander-timeout')
+        } catch (err) {
+            logger.log('wander-fail', `Wander failed: ${err.message}`, CONFIG.logThrottleMs.noFood)
+        }
+    }
+
+    async function openChestAndTakeOneFood(pos) {
+        const chestBlock = bot.blockAt(pos)
+        if (!chestBlock) return false
+        const chest = await bot.openChest(chestBlock)
+        try {
+            const items = typeof chest.containerItems === 'function' ? chest.containerItems() : chest.items()
+            const pick = pickChestFoodItem(bot, items)
+            if (!pick) return false
+            await chest.withdraw(pick.type, pick.metadata, 1)
+            logger.log('chest-withdraw', `Withdrew 1x ${pick.name} from chest at ${pos.x},${pos.y},${pos.z}.`, 0)
+            return true
+        } finally {
+            chest.close()
+        }
+    }
+
+    async function returnToPosition(pos) {
+        if (!pos) return
+        logger.log('returning', `Returning to ${pos.x.toFixed(1)}, ${pos.y.toFixed(1)}, ${pos.z.toFixed(1)}.`, 0)
+        try {
+            await gotoNear(pos, 1, 20000, 'return-timeout')
+        } catch (err) {
+            logger.log('return-fail', `Return failed: ${err.message}`, 0)
+        }
+        setTimeout(() => {
+            if (!isAfk) {
+                bot.chat('/afk')
+                logger.log('afk-on', 'Returned to /afk after chest seek (AFK mode on).', CONFIG.logThrottleMs.afk)
+                isAfk = true
+            }
+        }, CONFIG.returnAfkDelayMs)
+    }
+
+    async function seekFood(reason) {
+        if (!CONFIG.enableChestSeek) return
+        const now = Date.now()
+        if (seekInProgress) return
+        if (now < seekCooldownUntil) return
+
+        seekInProgress = true
+        seekStartPos = bot.entity.position.clone()
+        logger.log('seek-start', `${reason} Seeking food in nearby chests...`, CONFIG.logThrottleMs.noFood)
+        if (isAfk) {
+            isAfk = false
+            logger.log('afk-off', 'AFK mode off (seeking food).', CONFIG.logThrottleMs.afk)
+        }
+
+        let tookFood = false
+        const startAt = Date.now()
+        while (Date.now() - startAt < CONFIG.maxSeekDurationMs && !tookFood) {
+            const nearby = getNearbyChests().filter(isChestUsable)
+            if (nearby.length === 0) {
+                await wanderStep()
+                continue
+            }
+
+            const sorted = nearby
+                .slice()
+                .sort((a, b) => distanceSq(a, bot.entity.position) - distanceSq(b, bot.entity.position))
+
+            let progressed = false
+            for (const pos of sorted) {
+                if (!isChestUsable(pos)) continue
+                progressed = true
+                try {
+                    logger.log('move-chest', `Moving to chest at ${pos.x},${pos.y},${pos.z}.`, CONFIG.logThrottleMs.noFood)
+                    await gotoNear(pos, 1, 15000, 'chest-timeout')
+                } catch (err) {
+                    logger.log('chest-unreachable', `Chest unreachable at ${pos.x},${pos.y},${pos.z}: ${err.message}`, CONFIG.logThrottleMs.noFood)
+                    markChest(pos, 'unreachableUntil', CONFIG.chestUnreachableCooldownMs)
+                    continue
+                }
+
+                try {
+                    const got = await openChestAndTakeOneFood(pos)
+                    if (got) {
+                        tookFood = true
+                        break
+                    } else {
+                        logger.log('chest-empty', `No usable food in chest at ${pos.x},${pos.y},${pos.z}.`, CONFIG.logThrottleMs.noFood)
+                        markChest(pos, 'emptyUntil', CONFIG.chestEmptyCooldownMs)
+                    }
+                } catch (err) {
+                    logger.log('chest-error', `Chest error at ${pos.x},${pos.y},${pos.z}: ${err.message}`, CONFIG.logThrottleMs.noFood)
+                    markChest(pos, 'unreachableUntil', CONFIG.chestUnreachableCooldownMs)
+                }
+            }
+
+            if (!progressed) {
+                await wanderStep()
+            }
+        }
+
+        if (!tookFood) {
+            logger.log('seek-fail', 'No reachable chests with spare food found.', CONFIG.logThrottleMs.noFood)
+            seekCooldownUntil = Date.now() + CONFIG.seekCooldownMs
+        }
+
+        await returnToPosition(seekStartPos)
+        seekInProgress = false
+    }
 
     function tryEat(reason) {
         const now = Date.now()
@@ -225,6 +448,10 @@ function createBot() {
         const inv = getEdibleInventorySummary(bot)
         if (inv.edibleCount === 0) {
             logger.log('no-food', `${reason} No edible food in inventory.`, CONFIG.logThrottleMs.noFood)
+            seekFood(reason).catch(err => {
+                logger.log('seek-error', `Seek error: ${err.message}`, 0)
+                seekInProgress = false
+            })
             return // OPTIMIZATION: Early return - don't call eat() if no food
         }
 

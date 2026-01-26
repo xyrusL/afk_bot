@@ -12,6 +12,7 @@
   "description": "",
   "dependencies": {
     "mineflayer": "^4.33.0",
-    "mineflayer-auto-eat": "^5.0.3"
+    "mineflayer-auto-eat": "^5.0.3",
+    "mineflayer-pathfinder": "^2.4.5"
   }
 }
