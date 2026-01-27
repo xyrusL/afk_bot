@@ -1,545 +1,523 @@
 // ============================================================
-// AFK Bot Configuration
+// AFK Bot (patched: auto-eat timeout + chat cooldown + minor fixes)
 // ============================================================
-// You can edit the settings below to customize the bot.
-
-const CONFIG = {
-    // Server hostname 
-    
-    host: 'watermelon.deze.me',
-
-    // Server port 
-    port: 25565,
-
-    // Bot username
-    username: '_AfkBot',
-
-    // Set to 'false' (or null) to auto-detect version.
-    version: false,
-
-    // Delay in milliseconds before sending /afk after spawning (3000 = 3 seconds)
-    afkDelay: 3000,
-
-    // Delay in milliseconds before reconnecting after being kicked (3000 = 3 seconds)
-    reconnectDelay: 3000,
-
-    // Hunger threshold to start eating (max is 20). 50% hunger = 10.
-    hungerThreshold: 10,
-
-    // Health threshold to eat even if not hungry (max is 20)
-    healthThreshold: 10,
-
-    // Terminal status heartbeat (prints a compact status line periodically)
-    statusIntervalMs: 60000,
-
-    // Chest seeking (food) behavior
-    enableChestSeek: true,
-    chestScanRadius: 24,
-    chestScanIntervalMs: 5000,
-    chestEmptyCooldownMs: 300000,
-    chestUnreachableCooldownMs: 120000,
-    seekCooldownMs: 60000,
-    maxSeekDurationMs: 45000,
-    wanderStepBlocks: 10,
-    returnAfkDelayMs: 3000,
-
-    // Minimum time between repeated logs of the same kind
-    logThrottleMs: {
-        hunger: 30000,
-        eatAttempt: 15000,
-        noFood: 30000,
-        fullHunger: 30000,
-        afk: 15000,
-        connection: 3000
-    }
-}
-
-// ============================================================
-// DO NOT EDIT BELOW THIS LINE UNLESS YOU KNOW WHAT YOU'RE DOING
-// ============================================================
-
 const mineflayer = require('mineflayer')
 const autoEat = require('mineflayer-auto-eat').loader
-const { pathfinder, Movements, goals } = require('mineflayer-pathfinder')
-const { GoalNear } = goals
+const { pathfinder, Movements } = require('mineflayer-pathfinder')
 const { createLogger } = require('./logger')
+const CONNECTION = require('./config')
 
-let isAfk = false
+const CONFIG = {
+  afkDelay: 3000,
+  reconnectDelay: 3000,
 
-function getEdibleInventorySummary(bot) {
-    const items = bot.inventory?.items?.() ?? []
-    const foodsByName = bot.registry && bot.registry.foodsByName ? bot.registry.foodsByName : null
+  hungerThreshold: 10,
+  healthThreshold: 10,
 
-    if (!foodsByName) {
-        // Fallback when we can't reliably determine edibility for this version.
-        return { edibleCount: 0, edibleNames: [] }
+  lowFoodThresholdItems: 6,
+  foodRequestIntervalMs: 45000,
+
+  statusIntervalMs: 60000,
+
+  pingCheckIntervalMs: 5000,
+  highPingThresholdMs: 250,
+  highPingStrikes: 3,
+  highPingRecoveryStrikes: 3,
+  highPingHoldMs: 30000,
+
+  // --- auto-eat patches ---
+  eatTimeoutMs: 9000,          // <-- was effectively 3000 in plugin; raise it
+  eatBackoffOnFailMs: 7000,    // <-- wait before retrying after timeout/failure
+
+  // --- chat anti-spam ---
+  chatCooldownMs: 1500,
+
+  bannedFood: ['rotten_flesh', 'spider_eye', 'poisonous_potato', 'pufferfish'],
+  negativeEffects: [
+    'poison', 'hunger', 'slowness', 'weakness', 'wither', 'blindness', 'nausea',
+    'mining_fatigue', 'instant_damage', 'darkness', 'bad_omen', 'unluck'
+  ],
+
+  logThrottleMs: {
+    connection: 3000,
+    afk: 15000,
+    hunger: 30000,
+    noFood: 30000,
+    ping: 15000,
+    block: 30000
+  }
+}
+
+const FOOD_REQUEST_MESSAGES = [
+  'Uy gutom na ako, may extra food ba dyan?',
+  'Low na food ko guys, pahingi naman.',
+  'Im starving, sino may spare food?',
+  'Wala na akong makain, tulong pls.',
+  'Food check! Baka may sobra kayo.',
+  'Need food ASAP, di na kaya.'
+]
+const THANK_YOU_MESSAGES = [
+  'Salamat! Lifesaver ka.',
+  'Thanks sa food, appreciate it!',
+  'Maraming salamat, idol.'
+]
+const REJECTION_MESSAGES = [
+  'Tinapon ko yan kasi hindi safe kainin.',
+  'Sorry, harmful yan sa akin kaya tinapon ko.',
+  'That food is not safe for me, I had to throw it.'
+]
+const NEED_MORE_MESSAGES = [
+  'Salamat! Pero kulang pa food ko, pahingi pa please.',
+  'Appreciate it, pero low pa rin food ko.'
+]
+
+// ---------- tiny helpers ----------
+const now = () => Date.now()
+const pick = (arr) => arr[Math.floor(Math.random() * arr.length)]
+const throttle = (() => {
+  const last = new Map()
+  return (key, ms, fn) => {
+    const t = now()
+    if ((last.get(key) ?? 0) + ms > t) return
+    last.set(key, t)
+    fn()
+  }
+})()
+
+function getPingMs(bot) {
+  return (typeof bot?.player?.ping === 'number' && bot.player.ping)
+    || (typeof bot?._client?.ping === 'number' && bot._client.ping)
+    || (typeof bot?._client?.latency === 'number' && bot._client.latency)
+    || null
+}
+
+function disableBlockInteractions(bot, logger) {
+  if (bot._afkBlockGuardsInstalled) return
+  bot._afkBlockGuardsInstalled = true
+
+  if (typeof bot.dig === 'function') {
+    bot.dig = async () => {
+      logger.log('dig-blocked', 'Blocked dig attempt.', CONFIG.logThrottleMs.block)
+      throw new Error('digging disabled')
     }
+  }
 
-    const banned = new Set(bot.autoEat?.options?.bannedFood ?? [])
-    const edible = items.filter(it => foodsByName[it.name] && !banned.has(it.name))
-
-    const counts = new Map()
-    for (const it of edible) {
-        counts.set(it.name, (counts.get(it.name) ?? 0) + it.count)
+  if (typeof bot.placeBlock === 'function') {
+    bot.placeBlock = async () => {
+      logger.log('place-blocked', 'Blocked place attempt.', CONFIG.logThrottleMs.block)
+      throw new Error('block placing disabled')
     }
-    const edibleNames = Array.from(counts.entries())
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 5)
-        .map(([name, count]) => `${name}x${count}`)
-
-    return { edibleCount: edible.length, edibleNames }
+  }
 }
 
-function isEdibleItemName(bot, name) {
-    const foodsByName = bot.registry && bot.registry.foodsByName ? bot.registry.foodsByName : null
-    if (!foodsByName) return false
-    const banned = new Set(bot.autoEat?.options?.bannedFood ?? [])
-    return Boolean(foodsByName[name] && !banned.has(name))
+function configureMovementsNoBlockInteraction(movements) {
+  movements.canDig = false
+  movements.canPlaceBlocks = false
+  // keep both spellings (different mineflayer versions)
+  movements.scafoldingBlocks = []
+  movements.scaffoldBlocks = []
 }
 
-function pickChestFoodItem(bot, chestItems) {
-    for (const item of chestItems) {
-        if (isEdibleItemName(bot, item.name) && item.count > 1) {
-            return item
-        }
-    }
-    return null
-}
-
-function posKey(pos) {
-    return `${pos.x},${pos.y},${pos.z}`
-}
-
-function distanceSq(a, b) {
-    const dx = a.x - b.x
-    const dy = a.y - b.y
-    const dz = a.z - b.z
-    return dx * dx + dy * dy + dz * dz
-}
-
-function withTimeout(promise, ms, label) {
-    let timeoutId
-    const timeout = new Promise((_, reject) => {
-        timeoutId = setTimeout(() => {
-            reject(new Error(label || 'timeout'))
-        }, ms)
-    })
-    return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId))
-}
-
-const EAT_COOLDOWN_MS = 4000
-
-// Global reconnect state - ensures only ONE reconnection timer and ONE bot instance
-let reconnectTimer = null
+// ---------- global singleton reconnect ----------
 let currentBot = null
+let reconnectTimer = null
 
 function scheduleReconnect(delay = CONFIG.reconnectDelay) {
-    if (reconnectTimer) return // Already scheduled
-
-    const logger = createLogger({ name: 'AFK' })
+  if (reconnectTimer) return
+  const logger = createLogger({ name: 'AFK' })
+  throttle('reconnect-log', CONFIG.logThrottleMs.connection, () =>
     logger.log('reconnect', `Reconnecting in ${delay / 1000}s...`, CONFIG.logThrottleMs.connection)
-
-    reconnectTimer = setTimeout(() => {
-        reconnectTimer = null
-        createBot()
-    }, delay)
+  )
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null
+    createBot()
+  }, delay)
 }
 
 function createBot() {
-    // Clean up any existing bot
-    if (currentBot) {
-        try {
-            currentBot.removeAllListeners()
-            currentBot.quit()
-        } catch (e) { /* ignore */ }
-        currentBot = null
+  if (currentBot) {
+    try { currentBot.removeAllListeners(); currentBot.quit() } catch { }
+    currentBot = null
+  }
+
+  const logger = createLogger({ name: 'AFK' })
+  logger.log('connect', `Connecting to ${CONNECTION.host}:${CONNECTION.port} as ${CONNECTION.username}...`, CONFIG.logThrottleMs.connection)
+
+  const bot = mineflayer.createBot({
+    host: CONNECTION.host,
+    port: CONNECTION.port,
+    username: CONNECTION.username,
+    version: CONNECTION.version || false
+  })
+  currentBot = bot
+
+  // IMPORTANT: attach these immediately to avoid early crash
+  bot.on('error', (err) => {
+    logger.log('error', `Error: ${err?.message ?? String(err)}`, 0)
+    scheduleReconnect()
+  })
+  bot.on('end', (reason) => {
+    logger.log('end', `Disconnected: ${reason}`, 0)
+    scheduleReconnect()
+  })
+  bot.on('kicked', (reason) => {
+    const r = JSON.stringify(reason)
+    logger.log('kicked', `Kicked: ${r}`, 0)
+    scheduleReconnect(r.toLowerCase().includes('throttl') ? 10000 : CONFIG.reconnectDelay)
+  })
+
+  disableBlockInteractions(bot, logger)
+
+  bot.loadPlugin(autoEat)
+  bot.loadPlugin(pathfinder)
+
+  // ---------- state ----------
+  let isAfk = false
+  let isEating = false
+  let eatBackoffUntil = 0
+
+  let requestMode = false
+  let requestTimer = null
+  let lastRequestAt = 0
+
+  let movements = null
+  let lastKnownFoodCount = 0
+  let lastHealthCheckAt = 0
+  let lastActivity = 'startup'
+
+  let highPingMode = false
+  let highPingUntil = 0
+  let hiStrikes = 0
+  let loStrikes = 0
+
+  const negativeEffectIds = new Set()
+  const EAT_COOLDOWN_MS = 4000
+  let lastEatAttemptAt = 0
+
+  // chat cooldown to avoid double messages
+  let lastChatAt = 0
+  function safeChat(msg) {
+    const t = now()
+    if (t - lastChatAt < CONFIG.chatCooldownMs) return false
+    bot.chat(msg)
+    lastChatAt = t
+    return true
+  }
+
+  const setActivity = (s) => { lastActivity = s || 'unknown' }
+  const safeLog = (k, msg, ms = 0) => throttle(k, ms, () => logger.log(k, msg, ms))
+
+  function refreshNegativeEffectIds() {
+    negativeEffectIds.clear()
+    const effectsByName = bot.registry?.effectsByName ?? {}
+    for (const name of CONFIG.negativeEffects) {
+      const e = effectsByName[name]
+      if (e && typeof e.id === 'number') negativeEffectIds.add(e.id)
+    }
+  }
+
+  function foodHasNegativeEffects(foodInfo) {
+    for (const eff of (foodInfo?.effects ?? [])) {
+      const id = eff?.effect
+      if (typeof id === 'number' && negativeEffectIds.has(id)) return true
+    }
+    return false
+  }
+
+  function isSafeEdible(name) {
+    const foods = bot.registry?.foodsByName ?? null
+    if (!foods?.[name]) return false
+    if (CONFIG.bannedFood.includes(name)) return false
+    return !foodHasNegativeEffects(foods[name])
+  }
+
+  function safeFoodSummary() {
+    const items = bot.inventory?.items?.() ?? []
+    const foods = bot.registry?.foodsByName ?? null
+    if (!foods) return { count: 0, top: [] }
+
+    const counts = new Map()
+    for (const it of items) {
+      if (!foods[it.name]) continue
+      if (!isSafeEdible(it.name)) continue
+      counts.set(it.name, (counts.get(it.name) ?? 0) + it.count)
     }
 
-    const logger = createLogger({ name: 'AFK' })
-    logger.log('connect', `Connecting to ${CONFIG.host}:${CONFIG.port} as ${CONFIG.username}...`, CONFIG.logThrottleMs.connection)
+    let count = 0
+    for (const c of counts.values()) count += c
 
-    const bot = mineflayer.createBot({
-        host: CONFIG.host,
-        port: CONFIG.port,
-        username: CONFIG.username,
-        version: CONFIG.version || false
-    })
-    currentBot = bot
+    const top = [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([n, c]) => `${n}x${c}`)
 
-    // Load auto-eat plugin
-    bot.loadPlugin(autoEat)
-    bot.loadPlugin(pathfinder)
+    return { count, top }
+  }
 
-    bot.on('login', () => {
-        logger.log('login', 'Bot has logged in.', CONFIG.logThrottleMs.connection)
-    })
+  function stopAllMovement() {
+    try { bot.pathfinder?.stop(); bot.pathfinder?.setGoal(null) } catch { }
+  }
 
-    bot.on('spawn', () => {
-        logger.log('spawn', `Bot spawned. Waiting ${CONFIG.afkDelay / 1000}s to send /afk...`, CONFIG.logThrottleMs.connection)
+  function sendFoodRequest(reason = 'low-food', force = false) {
+    if (!requestMode && !force) return
+    const t = now()
+    if (!force && t - lastRequestAt < CONFIG.foodRequestIntervalMs) return
+    lastRequestAt = t
+    const msg = pick(FOOD_REQUEST_MESSAGES)
+    safeChat(msg)
+    safeLog('food-request', `[${reason}] ${msg}`, CONFIG.logThrottleMs.noFood)
+  }
 
-        if (!homePos) {
-            homePos = bot.entity.position.clone()
-            logger.log('home-set', `Home position set at ${homePos.x.toFixed(1)}, ${homePos.y.toFixed(1)}, ${homePos.z.toFixed(1)}.`, 0)
-        }
+  function setRequestMode(on, reason, foodCount) {
+    if (on === requestMode) return
+    requestMode = on
+    stopAllMovement()
 
-        if (!movements) {
-            movements = new Movements(bot, bot.registry)
-            bot.pathfinder.setMovements(movements)
-        }
+    if (requestMode) {
+      setActivity('request-food')
+      if (!isAfk) {
+        safeChat('/afk')
+        isAfk = true
+        safeLog('afk-on', 'Switched to /afk for request mode.', CONFIG.logThrottleMs.afk)
+      }
 
-        // Configure auto-eat
-        bot.autoEat.options = {
-            priority: 'foodPoints',
-            startAt: CONFIG.hungerThreshold,
-            bannedFood: ['rotten_flesh', 'spider_eye', 'poisonous_potato', 'pufferfish']
-        }
+      safeLog('request-start',
+        `${reason} Food low (safeFoodItems=${foodCount} < ${CONFIG.lowFoodThresholdItems}).`,
+        CONFIG.logThrottleMs.noFood
+      )
 
-        // Disable built-in auto-eat listener to prevent conflict with our manual health listener below.
-        // We will call bot.autoEat.eat() manually when we decide it's time.
-        if (typeof bot.autoEat.disable === 'function') {
-            bot.autoEat.disable()
-        }
+      if (!requestTimer) {
+        requestTimer = setInterval(() => requestMode && sendFoodRequest('timer'), Math.max(5000, CONFIG.foodRequestIntervalMs))
+        bot.once('end', () => { if (requestTimer) clearInterval(requestTimer); requestTimer = null })
+      }
 
-        setTimeout(() => {
-            bot.chat('/afk')
-            logger.log('afk-on', 'Chatted: /afk (AFK mode on).', CONFIG.logThrottleMs.afk)
-            isAfk = true
-        }, CONFIG.afkDelay)
+      sendFoodRequest('enter', true)
+    } else {
+      setActivity('request-complete')
+      if (requestTimer) { clearInterval(requestTimer); requestTimer = null }
+      safeLog('request-stop',
+        `Food ok again (safeFoodItems=${foodCount} >= ${CONFIG.lowFoodThresholdItems}).`,
+        CONFIG.logThrottleMs.noFood
+      )
+    }
+  }
 
-        // Periodic status heartbeat (non-spammy)
-        let lastHeartbeatAt = 0
-        const statusTimer = setInterval(() => {
-            const now = Date.now()
-            if (now - lastHeartbeatAt < CONFIG.statusIntervalMs) return
-            lastHeartbeatAt = now
+  function updateRequestMode(reason) {
+    const s = safeFoodSummary()
+    lastKnownFoodCount = s.count
+    setRequestMode(s.count < CONFIG.lowFoodThresholdItems, reason, s.count)
+    return s
+  }
 
-            const afkText = isAfk ? 'AFK' : 'ACTIVE'
-            const food = typeof bot.food === 'number' ? bot.food : '?'
-            const health = typeof bot.health === 'number' ? bot.health.toFixed(1) : '?'
-            logger.log('heartbeat', `Status: ${afkText} | health=${health} | food=${food} | eating=${isEating ? 'yes' : 'no'} | seeking=${seekInProgress ? 'yes' : 'no'}`)
-        }, Math.max(5000, Math.min(CONFIG.statusIntervalMs, 60000)))
+  // PATCHED: catch autoEat timeout + backoff
+  function tryEat(reason) {
+    const t = now()
 
-        bot.once('end', () => clearInterval(statusTimer))
-    })
+    if (t < eatBackoffUntil) return
+    if (isEating) return
+    if (t - lastEatAttemptAt < EAT_COOLDOWN_MS) return
+    if (bot.food >= 20) return
 
-    // Health monitoring - eat if low health (but don't call if already eating!)
-    let isEating = false;
-    let seekInProgress = false
-    let seekCooldownUntil = 0
-    let seekStartPos = null
-    let homePos = null
-    let movements = null
-    let lastChestScanAt = 0
-    let cachedChestPositions = []
-    const chestMemory = new Map()
-    let lastEatAttemptAt = 0;
-    let lastFood = null
-    let lastHealth = null
-    // OPTIMIZATION: Debounce health checks to reduce event processing frequency
-    let lastHealthCheckAt = 0
-    const HEALTH_CHECK_DEBOUNCE_MS = 2000 // Only process health events every 2 seconds
+    lastEatAttemptAt = t
+    setActivity('eat-attempt')
 
-    function getNearbyChests() {
-        const now = Date.now()
-        if (now - lastChestScanAt >= CONFIG.chestScanIntervalMs) {
-            lastChestScanAt = now
-            const chestId = bot.registry.blocksByName.chest?.id
-            if (typeof chestId !== 'number') {
-                cachedChestPositions = []
-            } else {
-                cachedChestPositions = bot.findBlocks({
-                    matching: chestId,
-                    maxDistance: CONFIG.chestScanRadius,
-                    count: 64
-                }) || []
-            }
-            logger.debug('chest-scan', `Chest scan: found ${cachedChestPositions.length} chests within ${CONFIG.chestScanRadius} blocks.`, CONFIG.chestScanIntervalMs)
-        }
-        return cachedChestPositions
+    const inv = safeFoodSummary()
+    if (!inv.count) {
+      safeLog('no-food', `${reason} No safe edible food in inventory.`, CONFIG.logThrottleMs.noFood)
+      updateRequestMode('no-food-to-eat')
+      return
     }
 
-    function markChest(pos, key, ms) {
-        const k = posKey(pos)
-        const now = Date.now()
-        const info = chestMemory.get(k) || { pos }
-        if (key === 'emptyUntil') info.emptyUntil = now + ms
-        if (key === 'unreachableUntil') info.unreachableUntil = now + ms
-        chestMemory.set(k, info)
-    }
+    safeLog('eat-attempt',
+      `${reason} Eating... (H=${bot.health?.toFixed?.(0) ?? '?'}, F=${bot.food})`,
+      CONFIG.logThrottleMs.hunger
+    )
 
-    function isChestUsable(pos) {
-        const info = chestMemory.get(posKey(pos))
-        const now = Date.now()
-        if (!info) return true
-        if (info.emptyUntil && now < info.emptyUntil) return false
-        if (info.unreachableUntil && now < info.unreachableUntil) return false
-        return true
-    }
+    // IMPORTANT: always catch rejection (prevents crash on "Eating timed out")
+    Promise.resolve(bot.autoEat.eat())
+      .catch((err) => {
+        const msg = err?.message ?? String(err)
+        safeLog('eat-failed', `Eat failed: ${msg}`, CONFIG.logThrottleMs.noFood)
 
-    async function gotoNear(pos, range, timeoutMs, label) {
-        const goal = new GoalNear(pos.x, pos.y, pos.z, range)
-        await withTimeout(bot.pathfinder.goto(goal), timeoutMs, label)
-    }
-
-    async function wanderStep() {
-        const dx = Math.floor(Math.random() * (CONFIG.wanderStepBlocks * 2 + 1)) - CONFIG.wanderStepBlocks
-        const dz = Math.floor(Math.random() * (CONFIG.wanderStepBlocks * 2 + 1)) - CONFIG.wanderStepBlocks
-        const target = bot.entity.position.offset(dx || 1, 0, dz || -1)
-        try {
-            await gotoNear(target, 1, 10000, 'wander-timeout')
-        } catch (err) {
-            logger.log('wander-fail', `Wander failed: ${err.message}`, CONFIG.logThrottleMs.noFood)
-        }
-    }
-
-    async function openChestAndTakeOneFood(pos) {
-        const chestBlock = bot.blockAt(pos)
-        if (!chestBlock) return false
-        const chest = await bot.openChest(chestBlock)
-        try {
-            const items = typeof chest.containerItems === 'function' ? chest.containerItems() : chest.items()
-            logger.debug('chest-items', `Chest items: ${items.length} total.`, CONFIG.logThrottleMs.noFood)
-            const pick = pickChestFoodItem(bot, items)
-            if (!pick) return false
-            await chest.withdraw(pick.type, pick.metadata, 1)
-            logger.log('chest-withdraw', `Withdrew 1x ${pick.name} from chest at ${pos.x},${pos.y},${pos.z}.`, 0)
-            return true
-        } finally {
-            chest.close()
-        }
-    }
-
-    async function returnToPosition(pos) {
-        if (!pos) return
-        logger.log('returning', `Returning to ${pos.x.toFixed(1)}, ${pos.y.toFixed(1)}, ${pos.z.toFixed(1)}.`, 0)
-        try {
-            await gotoNear(pos, 1, 20000, 'return-timeout')
-        } catch (err) {
-            logger.log('return-fail', `Return failed: ${err.message}`, 0)
-        }
-        setTimeout(() => {
-            if (!isAfk) {
-                bot.chat('/afk')
-                logger.log('afk-on', 'Returned to /afk after chest seek (AFK mode on).', CONFIG.logThrottleMs.afk)
-                isAfk = true
-            }
-        }, CONFIG.returnAfkDelayMs)
-    }
-
-    async function seekFood(reason) {
-        if (!CONFIG.enableChestSeek) return
-        const now = Date.now()
-        if (seekInProgress) return
-        if (now < seekCooldownUntil) return
-
-        seekInProgress = true
-        seekStartPos = bot.entity.position.clone()
-        logger.log('seek-start', `${reason} Seeking food in nearby chests...`, CONFIG.logThrottleMs.noFood)
-        if (isAfk) {
-            isAfk = false
-            logger.log('afk-off', 'AFK mode off (seeking food).', CONFIG.logThrottleMs.afk)
-        }
-
-        let tookFood = false
-        const startAt = Date.now()
-        while (Date.now() - startAt < CONFIG.maxSeekDurationMs && !tookFood) {
-            const nearby = getNearbyChests().filter(isChestUsable)
-            if (nearby.length === 0) {
-                await wanderStep()
-                continue
-            }
-
-            const sorted = nearby
-                .slice()
-                .sort((a, b) => distanceSq(a, bot.entity.position) - distanceSq(b, bot.entity.position))
-
-            let progressed = false
-            for (const pos of sorted) {
-                if (!isChestUsable(pos)) continue
-                progressed = true
-                try {
-                    logger.log('move-chest', `Moving to chest at ${pos.x},${pos.y},${pos.z}.`, CONFIG.logThrottleMs.noFood)
-                    await gotoNear(pos, 1, 15000, 'chest-timeout')
-                } catch (err) {
-                    logger.log('chest-unreachable', `Chest unreachable at ${pos.x},${pos.y},${pos.z}: ${err.message}`, CONFIG.logThrottleMs.noFood)
-                    markChest(pos, 'unreachableUntil', CONFIG.chestUnreachableCooldownMs)
-                    continue
-                }
-
-                try {
-                    const got = await openChestAndTakeOneFood(pos)
-                    if (got) {
-                        tookFood = true
-                        break
-                    } else {
-                        logger.log('chest-empty', `No usable food in chest at ${pos.x},${pos.y},${pos.z}.`, CONFIG.logThrottleMs.noFood)
-                        markChest(pos, 'emptyUntil', CONFIG.chestEmptyCooldownMs)
-                    }
-                } catch (err) {
-                    logger.log('chest-error', `Chest error at ${pos.x},${pos.y},${pos.z}: ${err.message}`, CONFIG.logThrottleMs.noFood)
-                    markChest(pos, 'unreachableUntil', CONFIG.chestUnreachableCooldownMs)
-                }
-            }
-
-            if (!progressed) {
-                await wanderStep()
-            }
-        }
-
-        if (!tookFood) {
-            logger.log('seek-fail', 'No reachable chests with spare food found.', CONFIG.logThrottleMs.noFood)
-            seekCooldownUntil = Date.now() + CONFIG.seekCooldownMs
-        }
-
-        await returnToPosition(seekStartPos)
-        seekInProgress = false
-    }
-
-    function tryEat(reason) {
-        const now = Date.now()
-        if (isEating) return
-        if (now - lastEatAttemptAt < EAT_COOLDOWN_MS) return
-        if (bot.food >= 20) {
-            // Can't eat when full hunger on most servers
-            // OPTIMIZATION: Only log full hunger if we actually tried to eat (throttled anyway)
-            logger.log('full-hunger', `${reason} Hunger is full (food=${bot.food}). Not eating.`, CONFIG.logThrottleMs.fullHunger)
-            return
-        }
-
-        lastEatAttemptAt = now
-        // OPTIMIZATION: Only scan inventory when we're actually going to eat, and log in one place
-        const inv = getEdibleInventorySummary(bot)
-        if (inv.edibleCount === 0) {
-            logger.log('no-food', `${reason} No edible food in inventory.`, CONFIG.logThrottleMs.noFood)
-            seekFood(reason).catch(err => {
-                logger.log('seek-error', `Seek error: ${err.message}`, 0)
-                seekInProgress = false
-            })
-            return // OPTIMIZATION: Early return - don't call eat() if no food
-        }
-
-        const top = inv.edibleNames.length ? ` (${inv.edibleNames.join(', ')})` : ''
-        logger.log('eat-attempt', `${reason} Eating${top}... (H=${bot.health.toFixed(0)}, F=${bot.food})`, CONFIG.logThrottleMs.eatAttempt)
-        logger.debug('inv-food', `Inventory edible summary: count=${inv.edibleCount}${top}`, CONFIG.logThrottleMs.eatAttempt)
-        try {
-            bot.autoEat.eat()
-        } catch (err) {
-            // Ignore "Already eating" and similar transient errors
-        }
-    }
-
-    bot.on('autoeat_started', () => {
-        logger.log('eat-start', 'Bot started eating.', 0)
-        isEating = true;
-        if (isAfk) {
-            isAfk = false;
-            logger.log('afk-off', 'AFK mode off (eating).', CONFIG.logThrottleMs.afk)
-        }
-    });
-
-    bot.on('autoeat_finished', () => {
-        logger.log('eat-finish', `Bot finished eating. (health=${bot.health.toFixed(1)}, food=${bot.food})`, 0)
-        isEating = false;
-        setTimeout(() => {
-            if (!isAfk) {
-                bot.chat('/afk');
-                logger.log('afk-on', 'Returned to /afk after eating (AFK mode on).', CONFIG.logThrottleMs.afk)
-                isAfk = true;
-            }
-        }, 1000);
-    });
-
-    bot.on('autoeat_stopped', () => {
-        // OPTIMIZATION: Removed duplicate /afk here - autoeat_finished handles the re-AFK
-        // This event fires when eating is interrupted (no food, can't eat, etc.)
-        if (bot.food >= 20) {
-            logger.log('eat-stop', 'Auto-eat stopped (hunger full).', CONFIG.logThrottleMs.fullHunger)
-        } else {
-            logger.log('eat-stop', 'Auto-eat stopped (no food / cannot eat).', CONFIG.logThrottleMs.noFood)
-        }
-        isEating = false;
-        // Only send /afk if we broke out of AFK and autoeat_finished won't fire
-        // autoeat_finished fires on successful completion, autoeat_stopped on interruption
-        if (!isAfk) {
-            setTimeout(() => {
-                if (!isAfk && !isEating) { // Double-check we're still not eating
-                    bot.chat('/afk');
-                    logger.log('afk-on', 'Returned to /afk (AFK mode on).', CONFIG.logThrottleMs.afk)
-                    isAfk = true;
-                }
-            }, 1000);
-        }
-    });
-
-    bot.on('autoeat_error', (err) => {
-        const msg = err && err.message ? err.message : String(err)
-        logger.log('eat-error', `Auto-eat error: ${msg}`, 0)
+        // backoff so we don't spam eat attempts during lag or blocked eating
+        eatBackoffUntil = now() + CONFIG.eatBackoffOnFailMs
         isEating = false
-    })
+        setActivity('eat-failed')
 
-    // Manual health monitoring - We drive the eating logic here to have fine-grained control and logging.
-    // This allows us to log "seeking food" BEFORE the action, and handle cooldowns explicitly.
-    // OPTIMIZATION: Debounced to prevent excessive processing on every server tick
-    bot.on('health', () => {
-        const now = Date.now()
-        // OPTIMIZATION: Skip processing if we checked recently (debounce)
-        if (now - lastHealthCheckAt < HEALTH_CHECK_DEBOUNCE_MS) return
-        lastHealthCheckAt = now
-
-        // Scenario logs (throttled): hunger/health changed, hungry state, seeking food, etc.
-        if (typeof bot.food === 'number' && bot.food !== lastFood) {
-            lastFood = bot.food
-            if (bot.food <= CONFIG.hungerThreshold) {
-                logger.log('hunger-low', `Bot is getting hungry (food=${bot.food} <= ${CONFIG.hungerThreshold}).`, CONFIG.logThrottleMs.hunger)
-            } else if (bot.food >= 18) {
-                logger.log('hunger-ok', `Bot hunger looks OK now (food=${bot.food}).`, CONFIG.logThrottleMs.hunger)
-            }
+        // ensure we go back to AFK if we were kicked out of it
+        if (!isAfk) {
+          setTimeout(() => {
+            if (!isAfk && !isEating) { safeChat('/afk'); isAfk = true }
+          }, 1000)
         }
+      })
+  }
 
-        if (typeof bot.health === 'number' && bot.health !== lastHealth) {
-            lastHealth = bot.health
-            if (bot.health <= CONFIG.healthThreshold) {
-                logger.log('health-low', `Bot health is low (health=${bot.health.toFixed(1)} <= ${CONFIG.healthThreshold}).`, CONFIG.logThrottleMs.hunger)
-            }
-        }
+  async function tossByName(name) {
+    const stack = bot.inventory?.items?.().find(it => it.name === name)
+    if (!stack) return false
+    try { await bot.tossStack(stack); return true } catch { return false }
+  }
 
-        // Requirements:
-        // - If hunger <= 50% (food <= 10), eat
-        // - Or if low health and can eat, eat
-        // OPTIMIZATION: Removed duplicate 'seek-food' log - tryEat already logs the attempt
-        if (bot.food <= CONFIG.hungerThreshold) {
-            tryEat(`[HUNGER<=${CONFIG.hungerThreshold}]`)
-            return
-        }
+  async function handleCollectedItem(collectedEntity) {
+    const dropped = typeof collectedEntity.getDroppedItem === 'function'
+      ? collectedEntity.getDroppedItem()
+      : collectedEntity.metadata?.item
+    if (!dropped || typeof dropped.type !== 'number') return
 
-        if (bot.health <= CONFIG.healthThreshold) {
-            tryEat(`[LOW_HEALTH<=${CONFIG.healthThreshold}]`)
-        }
-    });
+    const itemDef = bot.registry?.items?.[dropped.type]
+    const itemName = itemDef?.name
+    if (!itemName) return
 
+    const isEdible = Boolean(bot.registry?.foodsByName?.[itemName])
+    const safe = isSafeEdible(itemName)
 
-    bot.on('kicked', (reason) => {
-        const reasonStr = JSON.stringify(reason)
-        logger.log('kicked', `Kicked: ${reasonStr}`, 0)
+    if (!isEdible || !safe) {
+      const tossed = await tossByName(itemName)
+      safeChat(`${pick(REJECTION_MESSAGES)} (${!isEdible ? 'not edible' : 'negative effects'}).`)
+      safeLog('food-reject', `Rejected ${itemName}. Tossed=${tossed}.`, CONFIG.logThrottleMs.noFood)
+      updateRequestMode('reject-food')
+      return
+    }
 
-        // If throttled, wait longer (e.g. 10 seconds)
-        if (reasonStr.toLowerCase().includes('throttl')) {
-            scheduleReconnect(10000)
-        } else {
-            scheduleReconnect()
-        }
-    })
+    safeChat(pick(THANK_YOU_MESSAGES))
+    safeLog('food-accept', `Accepted: ${itemName}.`, 0)
 
-    bot.on('error', (err) => {
-        logger.log('error', `Error: ${err.message}`, 0)
-        scheduleReconnect()
-    })
+    const s = updateRequestMode('received-food')
+    if (s.count < CONFIG.lowFoodThresholdItems) {
+      // ONE message only, and reset request timer so timer won't instantly spam
+      safeChat(pick(NEED_MORE_MESSAGES))
+      lastRequestAt = now()
+    } else {
+      // also reset request timer after thanks to avoid immediate timer spam
+      lastRequestAt = now()
+    }
+  }
 
-    bot.on('end', (reason) => {
-        logger.log('end', `Disconnected: ${reason}`, 0)
-        scheduleReconnect()
-    })
+  // ---------- events ----------
+  bot.on('login', () => safeLog('login', 'Bot has logged in.', CONFIG.logThrottleMs.connection))
+
+  bot.on('spawn', () => {
+    safeLog('spawn', `Spawned. /afk in ${CONFIG.afkDelay / 1000}s...`, CONFIG.logThrottleMs.connection)
+
+    if (!movements) {
+      movements = new Movements(bot, bot.registry)
+      configureMovementsNoBlockInteraction(movements)
+      bot.pathfinder.setMovements(movements)
+    }
+
+    // Configure auto-eat (try both timeout option names; whichever your version supports will apply)
+    bot.autoEat.options = {
+      priority: 'foodPoints',
+      startAt: CONFIG.hungerThreshold,
+      bannedFood: CONFIG.bannedFood,
+      timeout: CONFIG.eatTimeoutMs,
+      eatingTimeout: CONFIG.eatTimeoutMs
+    }
+
+    refreshNegativeEffectIds()
+
+    // We trigger eat manually; disable built-in listener if exists
+    if (typeof bot.autoEat.disable === 'function') bot.autoEat.disable()
+
+    setTimeout(() => {
+      safeChat('/afk')
+      isAfk = true
+      safeLog('afk-on', 'Chatted: /afk (AFK on).', CONFIG.logThrottleMs.afk)
+      updateRequestMode('spawn-afk')
+    }, CONFIG.afkDelay)
+
+    // heartbeat
+    const hb = setInterval(() => {
+      const ping = getPingMs(bot)
+      logger.log(
+        'heartbeat',
+        `Status: ${isAfk ? 'AFK' : 'ACTIVE'} | health=${bot.health?.toFixed?.(1) ?? '?'} | food=${bot.food ?? '?'} | ping=${typeof ping === 'number' ? ping + 'ms' : '?'}(${highPingMode ? 'HIGH' : 'NORMAL'}) | eating=${isEating ? 'yes' : 'no'} | requesting=${requestMode ? 'yes' : 'no'}`
+      )
+    }, Math.max(5000, Math.min(CONFIG.statusIntervalMs, 60000)))
+    bot.once('end', () => clearInterval(hb))
+  })
+
+  bot.on('autoeat_started', () => {
+    isEating = true
+    setActivity('eating')
+    safeLog('eat-start', 'Bot started eating.', 0)
+    if (isAfk) { isAfk = false; safeLog('afk-off', 'AFK off (eating).', CONFIG.logThrottleMs.afk) }
+  })
+
+  bot.on('autoeat_finished', () => {
+    isEating = false
+    setActivity('eat-finished')
+    safeLog('eat-finish', `Finished eating. (health=${bot.health?.toFixed?.(1) ?? '?'}, food=${bot.food ?? '?'})`, 0)
+    setTimeout(() => {
+      if (!isAfk) { safeChat('/afk'); isAfk = true; safeLog('afk-on', 'Returned to /afk.', CONFIG.logThrottleMs.afk) }
+    }, 1000)
+  })
+
+  bot.on('autoeat_stopped', () => {
+    isEating = false
+    setActivity('eat-stopped')
+    safeLog('eat-stop', `Auto-eat stopped. (food=${bot.food ?? '?'})`, CONFIG.logThrottleMs.noFood)
+    if (!isAfk) setTimeout(() => {
+      if (!isAfk && !isEating) { safeChat('/afk'); isAfk = true; safeLog('afk-on', 'Returned to /afk.', CONFIG.logThrottleMs.afk) }
+    }, 1000)
+  })
+
+  bot.on('autoeat_error', (err) => {
+    isEating = false
+    setActivity('eat-error')
+    logger.log('eat-error', `Auto-eat error: ${err?.message ?? String(err)}`, 0)
+  })
+
+  bot.on('playerCollect', (collector, collected) => {
+    if (collector !== bot.entity) return
+    handleCollectedItem(collected).catch(e => logger.log('collect-error', `Collect handler error: ${e.message}`, 0))
+  })
+
+  // manual health driver (debounced)
+  bot.on('health', () => {
+    const t = now()
+    if (t - lastHealthCheckAt < 2000) return
+    lastHealthCheckAt = t
+
+    const prev = lastKnownFoodCount
+    const s = updateRequestMode('health-check')
+    if (s.count !== prev) {
+      safeLog(
+        'food-count',
+        `Safe edible items: ${s.count}${s.top.length ? ` (${s.top.join(', ')})` : ''}`,
+        CONFIG.logThrottleMs.noFood
+      )
+    }
+
+    // Optional: if high ping mode, you can choose to delay eating attempts slightly
+    // if (highPingMode) return
+
+    if (bot.food <= CONFIG.hungerThreshold) return tryEat(`[HUNGER<=${CONFIG.hungerThreshold}]`)
+    if (bot.health <= CONFIG.healthThreshold) return tryEat(`[LOW_HEALTH<=${CONFIG.healthThreshold}]`)
+  })
+
+  // ping monitor
+  const pingTimer = setInterval(() => {
+    const ping = getPingMs(bot)
+    if (typeof ping !== 'number') return
+
+    if (ping >= CONFIG.highPingThresholdMs) {
+      hiStrikes++; loStrikes = 0
+      if (!highPingMode && hiStrikes >= CONFIG.highPingStrikes) {
+        highPingMode = true
+        highPingUntil = now() + CONFIG.highPingHoldMs
+        safeLog('ping-high', `High ping (${ping}ms). Mode=HIGH. Last=${lastActivity}`, CONFIG.logThrottleMs.ping)
+      }
+    } else {
+      loStrikes++; hiStrikes = 0
+      if (highPingMode && now() >= highPingUntil && loStrikes >= CONFIG.highPingRecoveryStrikes) {
+        highPingMode = false
+        safeLog('ping-ok', `Ping recovered (${ping}ms). Mode=NORMAL.`, CONFIG.logThrottleMs.ping)
+      }
+    }
+  }, Math.max(1000, CONFIG.pingCheckIntervalMs))
+  bot.once('end', () => clearInterval(pingTimer))
 }
 
 createBot()
-
