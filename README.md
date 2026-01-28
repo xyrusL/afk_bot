@@ -66,6 +66,9 @@ Key settings you can tune inside `settings`:
 |---------|---------|-------------|
 | `afkDelay` | 3000ms | Delay before sending `/afk` after spawn |
 | `reconnectDelay` | 3000ms | Delay before reconnecting after disconnect |
+| `stopOnDuplicateLogin` | true | Stop reconnecting after duplicate login kicks |
+| `throttledReconnectDelayMs` | 30000ms | Initial delay after throttled reconnect kicks |
+| `throttledReconnectMaxMs` | 120000ms | Max delay for throttled reconnect backoff |
 | `afkCommand` | `/afk` | Chat command used to toggle AFK |
 | `sendAfkChat` | true | If false, no AFK command is sent |
 | `randomWalk.enabled` | false | Enable random walking |
@@ -99,6 +102,12 @@ Edit `custom_messages/messages.json` to change chat lines for food requests, tha
 ## Offline Behavior
 
 When `preConnectPing` is enabled, the bot pings the server before connecting. If the ping fails (server offline or unreachable), it waits and retries using an exponential backoff up to `offlineBackoffMaxMs`. If the server blocks status pings, the bot will treat it as offline until a ping succeeds.
+
+---
+
+## Connection Kicks
+
+If the server kicks for `duplicate_login` and `stopOnDuplicateLogin` is true, the bot stops reconnecting to avoid repeated kicks. If the server says "Connection throttled", the bot waits longer between reconnect attempts using `throttledReconnectDelayMs` up to `throttledReconnectMaxMs`.
 
 ---
 

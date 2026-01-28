@@ -90,10 +90,19 @@ function configureMovementsNoBlockInteraction(movements) {
 let currentBot = null
 let reconnectTimer = null
 let offlineBackoffMs = CONFIG.offlineBackoffBaseMs
+let reconnectDisabledReason = null
+let throttledBackoffMs = CONFIG.throttledReconnectDelayMs
 
 function scheduleReconnect(delay = CONFIG.reconnectDelay, opts = {}) {
   if (reconnectTimer) return
   const { silent = false } = opts
+  if (reconnectDisabledReason) {
+    if (!silent) {
+      const logger = createLogger({ name: 'AFK' })
+      logger.log('reconnect-disabled', `Reconnect disabled: ${reconnectDisabledReason}`, CONFIG.logThrottleMs.connection)
+    }
+    return
+  }
   if (!silent) {
     const logger = createLogger({ name: 'AFK' })
     throttle('reconnect-log', CONFIG.logThrottleMs.connection, () =>
@@ -134,6 +143,7 @@ function pingServerOnce() {
 }
 
 async function attemptConnect(reason = 'startup') {
+  if (reconnectDisabledReason) return
   if (!CONFIG.preConnectPing) {
     createBot()
     return
@@ -185,8 +195,20 @@ function createBot() {
   })
   bot.on('kicked', (reason) => {
     const r = JSON.stringify(reason)
+    const lower = r.toLowerCase()
     logger.log('kicked', `Kicked: ${r}`, 0)
-    scheduleReconnect(r.toLowerCase().includes('throttl') ? 10000 : CONFIG.reconnectDelay)
+    if (CONFIG.stopOnDuplicateLogin && (lower.includes('duplicate_login') || lower.includes('duplicate login'))) {
+      reconnectDisabledReason = 'duplicate_login'
+      logger.log('reconnect-disabled', 'Reconnect disabled due to duplicate login.', CONFIG.logThrottleMs.connection)
+      return
+    }
+    if (lower.includes('throttl')) {
+      const delay = Math.min(throttledBackoffMs, CONFIG.throttledReconnectMaxMs)
+      throttledBackoffMs = Math.min(throttledBackoffMs * 2, CONFIG.throttledReconnectMaxMs)
+      scheduleReconnect(delay)
+      return
+    }
+    scheduleReconnect(CONFIG.reconnectDelay)
   })
 
   disableBlockInteractions(bot, logger)
@@ -523,7 +545,10 @@ function createBot() {
   }
 
   // ---------- events ----------
-  bot.on('login', () => safeLog('login', 'Bot has logged in.', CONFIG.logThrottleMs.connection))
+  bot.on('login', () => {
+    throttledBackoffMs = CONFIG.throttledReconnectDelayMs
+    safeLog('login', 'Bot has logged in.', CONFIG.logThrottleMs.connection)
+  })
 
   bot.on('spawn', () => {
     safeLog('spawn', `Spawned. AFK in ${CONFIG.afkDelay / 1000}s...`, CONFIG.logThrottleMs.connection)
