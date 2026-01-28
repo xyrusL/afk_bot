@@ -1,5 +1,5 @@
 // ============================================================
-// AFK Bot (patched: auto-eat timeout + chat cooldown + minor fixes)
+// AFK Bot
 // ============================================================
 const mineflayer = require('mineflayer')
 const autoEat = require('mineflayer-auto-eat').loader
@@ -25,9 +25,9 @@ const CONFIG = {
   highPingRecoveryStrikes: 3,
   highPingHoldMs: 30000,
 
-  // --- auto-eat patches ---
-  eatTimeoutMs: 9000,          // <-- was effectively 3000 in plugin; raise it
-  eatBackoffOnFailMs: 7000,    // <-- wait before retrying after timeout/failure
+  // --- auto-eat tuning ---
+  eatTimeoutMs: 9000,          // eating timeout (ms)
+  eatBackoffOnFailMs: 7000,    // backoff after failed eat (ms)
 
   // --- chat anti-spam ---
   chatCooldownMs: 1500,
@@ -207,6 +207,81 @@ function createBot() {
   const setActivity = (s) => { lastActivity = s || 'unknown' }
   const safeLog = (k, msg, ms = 0) => throttle(k, ms, () => logger.log(k, msg, ms))
 
+  function setAfkOn(reason = 'Returned to /afk.', delayMs = 0) {
+    const apply = () => {
+      if (isAfk) return
+      safeChat('/afk')
+      isAfk = true
+      safeLog('afk-on', reason, CONFIG.logThrottleMs.afk)
+    }
+    if (delayMs > 0) setTimeout(apply, delayMs)
+    else apply()
+  }
+
+  function setAfkOff(reason = 'AFK off.') {
+    if (!isAfk) return
+    isAfk = false
+    safeLog('afk-off', reason, CONFIG.logThrottleMs.afk)
+  }
+
+  // low-level client errors (e.g., PartialReadError) can be thrown without hitting bot.on('error')
+  if (bot._client && !bot._client._afkClientErrHooked) {
+    bot._client._afkClientErrHooked = true
+    bot._client.on('error', (err) => {
+      const msg = err?.message ?? String(err)
+      const isPartial = err?.name === 'PartialReadError'
+        || msg.includes('PartialReadError')
+        || msg.includes('Unexpected buffer end')
+      safeLog('client-error', `Client error${isPartial ? ' (partial read)' : ''}: ${msg}`, CONFIG.logThrottleMs.connection)
+      scheduleReconnect()
+    })
+  }
+
+  function attachAutoEatEvents() {
+    if (bot._afkAutoEatEventsInstalled) return
+    bot._afkAutoEatEventsInstalled = true
+
+    const onStart = () => {
+      if (isEating) return
+      isEating = true
+      setActivity('eating')
+      safeLog('eat-start', 'Bot started eating.', 0)
+      setAfkOff('AFK off (eating).')
+    }
+    const onFinish = () => {
+      if (!isEating) return
+      isEating = false
+      setActivity('eat-finished')
+      safeLog('eat-finish', `Finished eating. (health=${bot.health?.toFixed?.(1) ?? '?'}, food=${bot.food ?? '?'})`, 0)
+      setAfkOn('Returned to /afk.', 1000)
+    }
+    const onStop = () => {
+      if (!isEating) return
+      isEating = false
+      setActivity('eat-stopped')
+      safeLog('eat-stop', `Auto-eat stopped. (food=${bot.food ?? '?'})`, CONFIG.logThrottleMs.noFood)
+      if (!isAfk) setAfkOn('Returned to /afk.', 1000)
+    }
+    const onError = (err) => {
+      isEating = false
+      setActivity('eat-error')
+      logger.log('eat-error', `Auto-eat error: ${err?.message ?? String(err)}`, 0)
+    }
+
+    // Newer mineflayer-auto-eat emits on the plugin instance
+    if (bot.autoEat?.on) {
+      bot.autoEat.on('eatStart', onStart)
+      bot.autoEat.on('eatFinish', onFinish)
+      bot.autoEat.on('eatFail', onError)
+    }
+
+    // Older mineflayer-auto-eat emits on the bot
+    bot.on('autoeat_started', onStart)
+    bot.on('autoeat_finished', onFinish)
+    bot.on('autoeat_stopped', onStop)
+    bot.on('autoeat_error', onError)
+  }
+
   function refreshNegativeEffectIds() {
     negativeEffectIds.clear()
     const effectsByName = bot.registry?.effectsByName ?? {}
@@ -276,9 +351,7 @@ function createBot() {
     if (requestMode) {
       setActivity('request-food')
       if (!isAfk) {
-        safeChat('/afk')
-        isAfk = true
-        safeLog('afk-on', 'Switched to /afk for request mode.', CONFIG.logThrottleMs.afk)
+        setAfkOn('Switched to /afk for request mode.')
       }
 
       safeLog('request-start',
@@ -309,7 +382,7 @@ function createBot() {
     return s
   }
 
-  // PATCHED: catch autoEat timeout + backoff
+  // Catch autoEat timeout + backoff
   function tryEat(reason) {
     const t = now()
 
@@ -346,9 +419,7 @@ function createBot() {
 
         // ensure we go back to AFK if we were kicked out of it
         if (!isAfk) {
-          setTimeout(() => {
-            if (!isAfk && !isEating) { safeChat('/afk'); isAfk = true }
-          }, 1000)
+          setAfkOn('Returned to /afk.', 1000)
         }
       })
   }
@@ -406,24 +477,31 @@ function createBot() {
       bot.pathfinder.setMovements(movements)
     }
 
-    // Configure auto-eat (try both timeout option names; whichever your version supports will apply)
-    bot.autoEat.options = {
+    // Configure auto-eat (newer plugin uses setOpts; fall back to legacy options field)
+    const autoEatOpts = {
       priority: 'foodPoints',
-      startAt: CONFIG.hungerThreshold,
+      minHunger: CONFIG.hungerThreshold,
+      minHealth: CONFIG.healthThreshold,
       bannedFood: CONFIG.bannedFood,
-      timeout: CONFIG.eatTimeoutMs,
       eatingTimeout: CONFIG.eatTimeoutMs
+    }
+    if (typeof bot.autoEat?.setOpts === 'function') bot.autoEat.setOpts(autoEatOpts)
+    else bot.autoEat.options = {
+      ...autoEatOpts,
+      startAt: CONFIG.hungerThreshold,
+      timeout: CONFIG.eatTimeoutMs
     }
 
     refreshNegativeEffectIds()
 
     // We trigger eat manually; disable built-in listener if exists
-    if (typeof bot.autoEat.disable === 'function') bot.autoEat.disable()
+    if (typeof bot.autoEat?.disableAuto === 'function') bot.autoEat.disableAuto()
+    else if (typeof bot.autoEat?.disable === 'function') bot.autoEat.disable()
+
+    attachAutoEatEvents()
 
     setTimeout(() => {
-      safeChat('/afk')
-      isAfk = true
-      safeLog('afk-on', 'Chatted: /afk (AFK on).', CONFIG.logThrottleMs.afk)
+      setAfkOn('Chatted: /afk (AFK on).')
       updateRequestMode('spawn-afk')
     }, CONFIG.afkDelay)
 
@@ -436,37 +514,6 @@ function createBot() {
       )
     }, Math.max(5000, Math.min(CONFIG.statusIntervalMs, 60000)))
     bot.once('end', () => clearInterval(hb))
-  })
-
-  bot.on('autoeat_started', () => {
-    isEating = true
-    setActivity('eating')
-    safeLog('eat-start', 'Bot started eating.', 0)
-    if (isAfk) { isAfk = false; safeLog('afk-off', 'AFK off (eating).', CONFIG.logThrottleMs.afk) }
-  })
-
-  bot.on('autoeat_finished', () => {
-    isEating = false
-    setActivity('eat-finished')
-    safeLog('eat-finish', `Finished eating. (health=${bot.health?.toFixed?.(1) ?? '?'}, food=${bot.food ?? '?'})`, 0)
-    setTimeout(() => {
-      if (!isAfk) { safeChat('/afk'); isAfk = true; safeLog('afk-on', 'Returned to /afk.', CONFIG.logThrottleMs.afk) }
-    }, 1000)
-  })
-
-  bot.on('autoeat_stopped', () => {
-    isEating = false
-    setActivity('eat-stopped')
-    safeLog('eat-stop', `Auto-eat stopped. (food=${bot.food ?? '?'})`, CONFIG.logThrottleMs.noFood)
-    if (!isAfk) setTimeout(() => {
-      if (!isAfk && !isEating) { safeChat('/afk'); isAfk = true; safeLog('afk-on', 'Returned to /afk.', CONFIG.logThrottleMs.afk) }
-    }, 1000)
-  })
-
-  bot.on('autoeat_error', (err) => {
-    isEating = false
-    setActivity('eat-error')
-    logger.log('eat-error', `Auto-eat error: ${err?.message ?? String(err)}`, 0)
   })
 
   bot.on('playerCollect', (collector, collected) => {

@@ -1,90 +1,88 @@
 # Mineflayer AFK Bot
 
-A smart Minecraft AFK bot built with [Mineflayer](https://github.com/PrismarineJS/mineflayer) that automatically maintains your presence on a server with intelligent hunger management, food safety filtering, and auto-reconnection capabilities.
+A Minecraft AFK bot built with Mineflayer that keeps you online, manages hunger safely, and reconnects when disconnected.
 
 ---
 
-## ✨ Features
+## Features
 
-### 🔄 Auto-AFK & Reconnect
-- Automatically runs `/afk` command after spawning (configurable delay)
-- Auto-reconnects on kick, error, or disconnection
-- Handles throttled connection kicks with extended reconnect delay
+### Auto-AFK and Reconnect
+- Sends `/afk` after spawn (configurable delay)
+- Reconnects on kick, error, or disconnect
+- Handles throttled kick reconnects with an extended delay
+- Detects low-level client read errors and reconnects
 
-### 🍖 Intelligent Hunger Management
-- **Auto-Eating**: Automatically eats when hunger drops to 50% (≤10) or health is low (≤10)
-- **Safe Food Filtering**: Only eats beneficial foods, avoiding:
-  - `rotten_flesh`, `spider_eye`, `poisonous_potato`, `pufferfish`
-  - Any food with negative effects (poison, hunger, weakness, etc.)
-- **Food Inventory Tracking**: Monitors safe edible food count in inventory
+### Hunger Management
+- Eats when hunger or health is low (configurable thresholds)
+- Safe food filter (banned items plus negative effects)
+- Configurable eating timeout and retry backoff
 
-### 🗣️ Food Request System
-- When food runs low (< 6 safe items), enters "request mode"
-- Periodically sends food request messages in chat (Filipino/English)
-- **Accepts/Rejects collected items**: 
-  - Accepts safe food with thank-you messages
-  - Automatically tosses harmful food with rejection messages
-  - Asks for more if still running low
+### Food Request System
+- Enters request mode when safe food runs low
+- Sends periodic food requests in chat
+- Accepts safe food with thank-you messages
+- Rejects unsafe food and discards it
 
-### 📊 Ping Monitoring
-- Monitors server ping every 5 seconds
-- Detects high ping situations (≥250ms) with strike system
-- Logs ping mode changes (NORMAL/HIGH) for debugging
+### Ping Monitoring
+- Tracks ping and logs NORMAL/HIGH states using a strike system
 
-### 🚫 Safety Features
-- **Block Breaking/Placing Disabled**: Prevents accidental griefing
-- **No Pathfinding Movement**: Stays in place, doesn't wander
-- **Throttled Logging**: Prevents log spam with smart message rate-limiting
+### Safety and Stability
+- Digging and block placement disabled
+- No wandering or pathfinding movement
+- Throttled logs to reduce spam
 
-### 📝 Status Heartbeat
-- Logs periodic status updates every 60 seconds including:
-  - AFK state, health, food level
-  - Current ping and ping mode
-  - Eating and food request status
+### Status Heartbeat
+- Periodic status logs for AFK state, health, food, ping, and request/eat state
 
 ---
 
-## ⚙️ Configuration
+## Configuration
 
 Edit `config.js` to change connection settings:
 
 ```javascript
 module.exports = {
-    host: 'your.server.ip',    // Server address
-    port: 25565,                // Server port
-    username: '_AfkBot',        // Bot username
-    version: false              // Auto-detect version (or specify like '1.20.1')
+    host: 'your.server.ip',
+    port: 25565,
+    username: '_AfkBot',
+    version: false // Auto-detect, or specify like '1.20.4'
 }
 ```
 
-### Advanced Configuration
+### Advanced Settings (index.js)
 
-Additional settings can be adjusted in `index.js` under the `CONFIG` object:
+Key settings you can tune inside the `CONFIG` object:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `afkDelay` | 3000ms | Delay before running /afk after spawn |
+| `afkDelay` | 3000ms | Delay before sending `/afk` after spawn |
 | `reconnectDelay` | 3000ms | Delay before reconnecting after disconnect |
-| `hungerThreshold` | 10 | Hunger level to trigger eating (50%) |
+| `hungerThreshold` | 10 | Hunger level to trigger eating |
 | `healthThreshold` | 10 | Health level to trigger emergency eating |
+| `eatTimeoutMs` | 9000ms | Timeout for a single eating action |
+| `eatBackoffOnFailMs` | 7000ms | Backoff after a failed eat attempt |
 | `lowFoodThresholdItems` | 6 | Safe food count to trigger request mode |
 | `foodRequestIntervalMs` | 45000ms | Time between food request messages |
+| `chatCooldownMs` | 1500ms | Minimum gap between chat messages |
 | `statusIntervalMs` | 60000ms | Time between status heartbeat logs |
-| `highPingThresholdMs` | 250ms | Ping threshold to trigger high-ping mode |
+| `pingCheckIntervalMs` | 5000ms | Ping check interval |
+| `highPingThresholdMs` | 250ms | Ping threshold for HIGH mode |
+| `highPingStrikes` | 3 | Strikes to enter HIGH mode |
+| `highPingRecoveryStrikes` | 3 | Strikes to exit HIGH mode |
 
 ---
 
-## 📦 Dependencies
+## Dependencies
 
-- `mineflayer` - Core Minecraft bot framework
-- `mineflayer-auto-eat` - Automatic eating functionality
-- `mineflayer-pathfinder` - Movement system (used for configuration only)
+- `mineflayer`
+- `mineflayer-auto-eat`
+- `mineflayer-pathfinder`
 
 ---
 
-## 🚀 How to Run (PC)
+## How to Run (PC)
 
-1. Install [Node.js](https://nodejs.org/) (v16+ recommended)
+1. Install Node.js (v16+ recommended)
 2. Open a terminal in the bot folder
 3. Install dependencies (first time only):
    ```bash
@@ -98,17 +96,15 @@ Additional settings can be adjusted in `index.js` under the `CONFIG` object:
 
 ---
 
-## 📱 How to Run on Android (Termux)
+## How to Run on Android (Termux)
 
-### Option 1: From ZIP Download
-
-1. **Install Termux** from [F-Droid](https://f-droid.org/en/packages/com.termux/)
+1. Install Termux from F-Droid
 2. Set up the environment:
    ```bash
    pkg update && pkg upgrade -y
    pkg install nodejs -y
    ```
-3. Enable storage access and navigate to download folder:
+3. Enable storage access and navigate to the download folder:
    ```bash
    termux-setup-storage
    cd storage/downloads/afk_bot
@@ -119,45 +115,9 @@ Additional settings can be adjusted in `index.js` under the `CONFIG` object:
    npm start
    ```
 
-### Option 2: Using wget
-
-1. Install required packages:
-   ```bash
-   pkg install wget unzip -y
-   ```
-2. Download and extract:
-   ```bash
-   wget https://github.com/YOUR_USERNAME/YOUR_REPO/archive/refs/heads/main.zip -O afk_bot.zip
-   unzip afk_bot.zip
-   mv YOUR_REPO-main afk_bot
-   rm afk_bot.zip
-   ```
-3. Install and run:
-   ```bash
-   cd afk_bot
-   npm install
-   npm start
-   ```
-
 ---
 
-## 🔄 How to Update
-
-### Git Users
-```bash
-git pull
-npm install
-```
-
-### ZIP Users
-1. Download the latest release
-2. Extract files
-3. Copy your `config.js` settings to the new folder
-4. Run `npm install` to update dependencies
-
----
-
-## 📋 Log Messages Reference
+## Log Messages Reference
 
 | Log Key | Description |
 |---------|-------------|
@@ -172,15 +132,6 @@ npm install
 
 ---
 
-## 🛡️ Safety Notes
-
-- The bot will **never** break or place blocks
-- The bot will **never** attack entities
-- The bot only moves to eat, then returns to AFK
-- All potentially harmful foods are automatically rejected and discarded
-
----
-
-## 📄 License
+## License
 
 ISC
