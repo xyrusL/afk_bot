@@ -1,7 +1,10 @@
 // ============================================================
 // AFK Bot
 // ============================================================
+const fs = require('fs')
+const path = require('path')
 const mineflayer = require('mineflayer')
+const { ping } = require('minecraft-protocol')
 const autoEat = require('mineflayer-auto-eat').loader
 const { pathfinder, Movements } = require('mineflayer-pathfinder')
 const { createLogger } = require('./logger')
@@ -18,6 +21,12 @@ const CONFIG = {
   foodRequestIntervalMs: 45000,
 
   statusIntervalMs: 60000,
+
+  // --- pre-connect ping ---
+  preConnectPing: true,
+  pingTimeoutMs: 2000,
+  offlineBackoffBaseMs: 5000,
+  offlineBackoffMaxMs: 60000,
 
   pingCheckIntervalMs: 5000,
   highPingThresholdMs: 250,
@@ -48,28 +57,54 @@ const CONFIG = {
   }
 }
 
-const FOOD_REQUEST_MESSAGES = [
-  'Uy gutom na ako, may extra food ba dyan?',
-  'Low na food ko guys, pahingi naman.',
-  'Im starving, sino may spare food?',
-  'Wala na akong makain, tulong pls.',
-  'Food check! Baka may sobra kayo.',
-  'Need food ASAP, di na kaya.'
-]
-const THANK_YOU_MESSAGES = [
-  'Salamat! Lifesaver ka.',
-  'Thanks sa food, appreciate it!',
-  'Maraming salamat, idol.'
-]
-const REJECTION_MESSAGES = [
-  'Tinapon ko yan kasi hindi safe kainin.',
-  'Sorry, harmful yan sa akin kaya tinapon ko.',
-  'That food is not safe for me, I had to throw it.'
-]
-const NEED_MORE_MESSAGES = [
-  'Salamat! Pero kulang pa food ko, pahingi pa please.',
-  'Appreciate it, pero low pa rin food ko.'
-]
+const DEFAULT_MESSAGES = {
+  foodRequest: [
+    'Uy gutom na ako, may extra food ba dyan?',
+    'Low na food ko guys, pahingi naman.',
+    'Im starving, sino may spare food?',
+    'Wala na akong makain, tulong pls.',
+    'Food check! Baka may sobra kayo.',
+    'Need food ASAP, di na kaya.'
+  ],
+  thankYou: [
+    'Salamat! Lifesaver ka.',
+    'Thanks sa food, appreciate it!',
+    'Maraming salamat, idol.'
+  ],
+  rejection: [
+    'Tinapon ko yan kasi hindi safe kainin.',
+    'Sorry, harmful yan sa akin kaya tinapon ko.',
+    'That food is not safe for me, I had to throw it.'
+  ],
+  needMore: [
+    'Salamat! Pero kulang pa food ko, pahingi pa please.',
+    'Appreciate it, pero low pa rin food ko.'
+  ]
+}
+
+function loadMessages() {
+  const filePath = path.join(__dirname, 'custom_messages', 'messages.json')
+  const normalizeArray = (value, fallback) =>
+    Array.isArray(value) && value.length ? value.map((v) => String(v)) : fallback
+  try {
+    const raw = fs.readFileSync(filePath, 'utf8')
+    const parsed = JSON.parse(raw)
+    return {
+      foodRequest: normalizeArray(parsed?.foodRequest, DEFAULT_MESSAGES.foodRequest),
+      thankYou: normalizeArray(parsed?.thankYou, DEFAULT_MESSAGES.thankYou),
+      rejection: normalizeArray(parsed?.rejection, DEFAULT_MESSAGES.rejection),
+      needMore: normalizeArray(parsed?.needMore, DEFAULT_MESSAGES.needMore)
+    }
+  } catch {
+    return DEFAULT_MESSAGES
+  }
+}
+
+const MESSAGES = loadMessages()
+const FOOD_REQUEST_MESSAGES = MESSAGES.foodRequest
+const THANK_YOU_MESSAGES = MESSAGES.thankYou
+const REJECTION_MESSAGES = MESSAGES.rejection
+const NEED_MORE_MESSAGES = MESSAGES.needMore
 
 // ---------- tiny helpers ----------
 const now = () => Date.now()
@@ -121,17 +156,72 @@ function configureMovementsNoBlockInteraction(movements) {
 // ---------- global singleton reconnect ----------
 let currentBot = null
 let reconnectTimer = null
+let offlineBackoffMs = CONFIG.offlineBackoffBaseMs
 
-function scheduleReconnect(delay = CONFIG.reconnectDelay) {
+function scheduleReconnect(delay = CONFIG.reconnectDelay, opts = {}) {
   if (reconnectTimer) return
-  const logger = createLogger({ name: 'AFK' })
-  throttle('reconnect-log', CONFIG.logThrottleMs.connection, () =>
-    logger.log('reconnect', `Reconnecting in ${delay / 1000}s...`, CONFIG.logThrottleMs.connection)
-  )
+  const { silent = false } = opts
+  if (!silent) {
+    const logger = createLogger({ name: 'AFK' })
+    throttle('reconnect-log', CONFIG.logThrottleMs.connection, () =>
+      logger.log('reconnect', `Reconnecting in ${delay / 1000}s...`, CONFIG.logThrottleMs.connection)
+    )
+  }
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null
-    createBot()
+    attemptConnect('reconnect')
   }, delay)
+}
+
+function pingServerOnce() {
+  const opts = {
+    host: CONNECTION.host,
+    port: CONNECTION.port,
+    timeout: CONFIG.pingTimeoutMs
+  }
+  if (CONNECTION.version) opts.version = CONNECTION.version
+
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const done = (err, res) => {
+      if (settled) return
+      settled = true
+      if (err) reject(err)
+      else resolve(res)
+    }
+    try {
+      const result = ping(opts, done)
+      if (result && typeof result.then === 'function') {
+        result.then((res) => done(null, res)).catch((err) => done(err))
+      }
+    } catch (err) {
+      done(err)
+    }
+  })
+}
+
+async function attemptConnect(reason = 'startup') {
+  if (!CONFIG.preConnectPing) {
+    createBot()
+    return
+  }
+
+  const logger = createLogger({ name: 'AFK' })
+  try {
+    throttle('ping-log', CONFIG.logThrottleMs.connection, () =>
+      logger.log('ping', `Pinging ${CONNECTION.host}:${CONNECTION.port}... (${reason})`, CONFIG.logThrottleMs.connection)
+    )
+    await pingServerOnce()
+    offlineBackoffMs = CONFIG.offlineBackoffBaseMs
+    logger.log('ping-ok', 'Server online. Connecting...', CONFIG.logThrottleMs.connection)
+    createBot()
+  } catch (err) {
+    const msg = err?.message ?? String(err)
+    const wait = offlineBackoffMs
+    logger.log('ping-offline', `Server offline/unreachable: ${msg}. Retrying in ${Math.ceil(wait / 1000)}s...`, CONFIG.logThrottleMs.connection)
+    offlineBackoffMs = Math.min(offlineBackoffMs * 2, CONFIG.offlineBackoffMaxMs)
+    scheduleReconnect(wait, { silent: true })
+  }
 }
 
 function createBot() {
@@ -567,4 +657,4 @@ function createBot() {
   bot.once('end', () => clearInterval(pingTimer))
 }
 
-createBot()
+attemptConnect('startup')

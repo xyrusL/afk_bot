@@ -1,0 +1,24 @@
+{
+  "foodRequest": [
+    "Uy gutom na ako, may extra food ba dyan?",
+    "Low na food ko guys, pahingi naman.",
+    "Im starving, sino may spare food?",
+    "Wala na akong makain, tulong pls.",
+    "Food check! Baka may sobra kayo.",
+    "Need food ASAP, di na kaya."
+  ],
+  "thankYou": [
+    "Salamat! Lifesaver ka.",
+    "Thanks sa food, appreciate it!",
+    "Maraming salamat, idol."
+  ],
+  "rejection": [
+    "Tinapon ko yan kasi hindi safe kainin.",
+    "Sorry, harmful yan sa akin kaya tinapon ko.",
+    "That food is not safe for me, I had to throw it."
+  ],
+  "needMore": [
+    "Salamat! Pero kulang pa food ko, pahingi pa please.",
+    "Appreciate it, pero low pa rin food ko."
+  ]
+}

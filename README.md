@@ -11,6 +11,7 @@ A Minecraft AFK bot built with Mineflayer that keeps you online, manages hunger 
 - Reconnects on kick, error, or disconnect
 - Handles throttled kick reconnects with an extended delay
 - Detects low-level client read errors and reconnects
+- Pre-connect server ping with retry backoff when offline
 
 ### Hunger Management
 - Eats when hunger or health is low (configurable thresholds)
@@ -61,6 +62,10 @@ Key settings you can tune inside the `CONFIG` object:
 | `healthThreshold` | 10 | Health level to trigger emergency eating |
 | `eatTimeoutMs` | 9000ms | Timeout for a single eating action |
 | `eatBackoffOnFailMs` | 7000ms | Backoff after a failed eat attempt |
+| `preConnectPing` | true | Ping server before connecting |
+| `pingTimeoutMs` | 2000ms | Timeout for the pre-connect ping |
+| `offlineBackoffBaseMs` | 5000ms | Initial retry delay when server is offline |
+| `offlineBackoffMaxMs` | 60000ms | Max retry delay when server stays offline |
 | `lowFoodThresholdItems` | 6 | Safe food count to trigger request mode |
 | `foodRequestIntervalMs` | 45000ms | Time between food request messages |
 | `chatCooldownMs` | 1500ms | Minimum gap between chat messages |
@@ -69,6 +74,18 @@ Key settings you can tune inside the `CONFIG` object:
 | `highPingThresholdMs` | 250ms | Ping threshold for HIGH mode |
 | `highPingStrikes` | 3 | Strikes to enter HIGH mode |
 | `highPingRecoveryStrikes` | 3 | Strikes to exit HIGH mode |
+
+---
+
+## Custom Messages
+
+Edit `custom_messages/messages.json` to change chat lines for food requests, thank-you messages, rejections, and follow-ups.
+
+---
+
+## Offline Behavior
+
+When `preConnectPing` is enabled, the bot pings the server before connecting. If the ping fails (server offline or unreachable), it waits and retries using an exponential backoff up to `offlineBackoffMaxMs`. If the server blocks status pings, the bot will treat it as offline until a ping succeeds.
 
 ---
 
