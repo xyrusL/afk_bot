@@ -95,7 +95,6 @@ let throttledBackoffMs = CONFIG.throttledReconnectDelayMs
 
 const getReconnectDelayMs = () => {
   if (Number.isFinite(CONFIG.reconnectDelayMs)) return CONFIG.reconnectDelayMs
-  if (Number.isFinite(CONFIG.reconnectDelay)) return CONFIG.reconnectDelay
   return 3000
 }
 
