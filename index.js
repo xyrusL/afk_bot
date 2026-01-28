@@ -53,11 +53,12 @@ const throttle = (() => {
 })()
 
 function getPingMs(bot) {
-  return (typeof bot?.player?.ping === 'number' && bot.player.ping)
-    || (typeof bot?._client?.ping === 'number' && bot._client.ping)
-    || (typeof bot?._client?.latency === 'number' && bot._client.latency)
-    || null
+  if (typeof bot?.player?.ping === 'number') return bot.player.ping
+  if (typeof bot?._client?.ping === 'number') return bot._client.ping
+  if (typeof bot?._client?.latency === 'number') return bot._client.latency
+  return null
 }
+
 
 function disableBlockInteractions(bot, logger) {
   if (bot._afkBlockGuardsInstalled) return
