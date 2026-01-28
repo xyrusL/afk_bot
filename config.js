@@ -7,7 +7,7 @@ module.exports = {
   },
   settings: {
     afkDelay: 3000,
-    reconnectDelay: 3000,
+    reconnectDelayMs: 3000,
     stopOnDuplicateLogin: true,
     throttledReconnectDelayMs: 30000,
     throttledReconnectMaxMs: 120000,

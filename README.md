@@ -65,7 +65,7 @@ Key settings you can tune inside `settings`:
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `afkDelay` | 3000ms | Delay before sending `/afk` after spawn |
-| `reconnectDelay` | 3000ms | Delay before reconnecting after disconnect |
+| `reconnectDelayMs` | 3000ms | Delay before reconnecting after disconnect |
 | `stopOnDuplicateLogin` | true | Stop reconnecting after duplicate login kicks |
 | `throttledReconnectDelayMs` | 30000ms | Initial delay after throttled reconnect kicks |
 | `throttledReconnectMaxMs` | 120000ms | Max delay for throttled reconnect backoff |

@@ -93,7 +93,13 @@ let offlineBackoffMs = CONFIG.offlineBackoffBaseMs
 let reconnectDisabledReason = null
 let throttledBackoffMs = CONFIG.throttledReconnectDelayMs
 
-function scheduleReconnect(delay = CONFIG.reconnectDelay, opts = {}) {
+const getReconnectDelayMs = () => {
+  if (Number.isFinite(CONFIG.reconnectDelayMs)) return CONFIG.reconnectDelayMs
+  if (Number.isFinite(CONFIG.reconnectDelay)) return CONFIG.reconnectDelay
+  return 3000
+}
+
+function scheduleReconnect(delay = getReconnectDelayMs(), opts = {}) {
   if (reconnectTimer) return
   const { silent = false } = opts
   if (reconnectDisabledReason) {
@@ -208,7 +214,7 @@ function createBot() {
       scheduleReconnect(delay)
       return
     }
-    scheduleReconnect(CONFIG.reconnectDelay)
+    scheduleReconnect()
   })
 
   disableBlockInteractions(bot, logger)
