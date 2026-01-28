@@ -6,97 +6,30 @@ const path = require('path')
 const mineflayer = require('mineflayer')
 const { ping } = require('minecraft-protocol')
 const autoEat = require('mineflayer-auto-eat').loader
-const { pathfinder, Movements } = require('mineflayer-pathfinder')
+const { pathfinder, Movements, GoalBlock } = require('mineflayer-pathfinder')
 const { createLogger } = require('./logger')
-const CONNECTION = require('./config')
-
-const CONFIG = {
-  afkDelay: 3000,
-  reconnectDelay: 3000,
-
-  hungerThreshold: 10,
-  healthThreshold: 10,
-
-  lowFoodThresholdItems: 6,
-  foodRequestIntervalMs: 45000,
-
-  statusIntervalMs: 60000,
-
-  // --- pre-connect ping ---
-  preConnectPing: true,
-  pingTimeoutMs: 2000,
-  offlineBackoffBaseMs: 5000,
-  offlineBackoffMaxMs: 60000,
-
-  pingCheckIntervalMs: 5000,
-  highPingThresholdMs: 250,
-  highPingStrikes: 3,
-  highPingRecoveryStrikes: 3,
-  highPingHoldMs: 30000,
-
-  // --- auto-eat tuning ---
-  eatTimeoutMs: 9000,          // eating timeout (ms)
-  eatBackoffOnFailMs: 7000,    // backoff after failed eat (ms)
-
-  // --- chat anti-spam ---
-  chatCooldownMs: 1500,
-
-  bannedFood: ['rotten_flesh', 'spider_eye', 'poisonous_potato', 'pufferfish'],
-  negativeEffects: [
-    'poison', 'hunger', 'slowness', 'weakness', 'wither', 'blindness', 'nausea',
-    'mining_fatigue', 'instant_damage', 'darkness', 'bad_omen', 'unluck'
-  ],
-
-  logThrottleMs: {
-    connection: 3000,
-    afk: 15000,
-    hunger: 30000,
-    noFood: 30000,
-    ping: 15000,
-    block: 30000
-  }
-}
-
-const DEFAULT_MESSAGES = {
-  foodRequest: [
-    'Uy gutom na ako, may extra food ba dyan?',
-    'Low na food ko guys, pahingi naman.',
-    'Im starving, sino may spare food?',
-    'Wala na akong makain, tulong pls.',
-    'Food check! Baka may sobra kayo.',
-    'Need food ASAP, di na kaya.'
-  ],
-  thankYou: [
-    'Salamat! Lifesaver ka.',
-    'Thanks sa food, appreciate it!',
-    'Maraming salamat, idol.'
-  ],
-  rejection: [
-    'Tinapon ko yan kasi hindi safe kainin.',
-    'Sorry, harmful yan sa akin kaya tinapon ko.',
-    'That food is not safe for me, I had to throw it.'
-  ],
-  needMore: [
-    'Salamat! Pero kulang pa food ko, pahingi pa please.',
-    'Appreciate it, pero low pa rin food ko.'
-  ]
-}
+const { connection: CONNECTION, settings: CONFIG } = require('./config')
 
 function loadMessages() {
-  const filePath = path.join(__dirname, 'custom_messages', 'messages.json')
-  const normalizeArray = (value, fallback) =>
-    Array.isArray(value) && value.length ? value.map((v) => String(v)) : fallback
+  const filePath = path.resolve(__dirname, CONFIG.messagesPath || 'custom_messages/messages.json')
+  const normalizeArray = (value) =>
+    Array.isArray(value) && value.length ? value.map((v) => String(v)) : []
   try {
     const raw = fs.readFileSync(filePath, 'utf8')
     const parsed = JSON.parse(raw)
     return {
-      foodRequest: normalizeArray(parsed?.foodRequest, DEFAULT_MESSAGES.foodRequest),
-      thankYou: normalizeArray(parsed?.thankYou, DEFAULT_MESSAGES.thankYou),
-      rejection: normalizeArray(parsed?.rejection, DEFAULT_MESSAGES.rejection),
-      needMore: normalizeArray(parsed?.needMore, DEFAULT_MESSAGES.needMore)
+      foodRequest: normalizeArray(parsed?.foodRequest),
+      thankYou: normalizeArray(parsed?.thankYou),
+      rejection: normalizeArray(parsed?.rejection),
+      needMore: normalizeArray(parsed?.needMore)
     }
   } catch {
-    return DEFAULT_MESSAGES
+    return {
+      foodRequest: [],
+      thankYou: [],
+      rejection: [],
+      needMore: []
+    }
   }
 }
 
@@ -108,7 +41,7 @@ const NEED_MORE_MESSAGES = MESSAGES.needMore
 
 // ---------- tiny helpers ----------
 const now = () => Date.now()
-const pick = (arr) => arr[Math.floor(Math.random() * arr.length)]
+const pick = (arr) => (Array.isArray(arr) && arr.length ? arr[Math.floor(Math.random() * arr.length)] : null)
 const throttle = (() => {
   const last = new Map()
   return (key, ms, fn) => {
@@ -288,6 +221,7 @@ function createBot() {
   let lastChatAt = 0
   function safeChat(msg) {
     const t = now()
+    if (!msg) return false
     if (t - lastChatAt < CONFIG.chatCooldownMs) return false
     bot.chat(msg)
     lastChatAt = t
@@ -297,10 +231,10 @@ function createBot() {
   const setActivity = (s) => { lastActivity = s || 'unknown' }
   const safeLog = (k, msg, ms = 0) => throttle(k, ms, () => logger.log(k, msg, ms))
 
-  function setAfkOn(reason = 'Returned to /afk.', delayMs = 0) {
+  function setAfkOn(reason = 'AFK on.', delayMs = 0) {
     const apply = () => {
       if (isAfk) return
-      safeChat('/afk')
+      if (CONFIG.sendAfkChat && CONFIG.afkCommand) safeChat(CONFIG.afkCommand)
       isAfk = true
       safeLog('afk-on', reason, CONFIG.logThrottleMs.afk)
     }
@@ -312,6 +246,35 @@ function createBot() {
     if (!isAfk) return
     isAfk = false
     safeLog('afk-off', reason, CONFIG.logThrottleMs.afk)
+  }
+
+  let randomWalkTimer = null
+  function startRandomWalk() {
+    if (!CONFIG.randomWalk?.enabled) return
+    if (randomWalkTimer) return
+    const interval = Math.max(1000, CONFIG.randomWalk.intervalMs || 15000)
+    randomWalkTimer = setInterval(() => {
+      if (!CONFIG.randomWalk?.enabled) return
+      if (!bot.entity || !movements) return
+      if (requestMode || isEating) return
+
+      const radius = Math.max(1, CONFIG.randomWalk.radius || 6)
+      const dx = Math.floor(Math.random() * (radius * 2 + 1)) - radius
+      const dz = Math.floor(Math.random() * (radius * 2 + 1)) - radius
+      if (dx === 0 && dz === 0) return
+
+      const pos = bot.entity.position
+      const x = Math.floor(pos.x + dx)
+      const y = Math.floor(pos.y)
+      const z = Math.floor(pos.z + dz)
+
+      bot.pathfinder.setMovements(movements)
+      bot.pathfinder.setGoal(new GoalBlock(x, y, z))
+    }, interval)
+    bot.once('end', () => {
+      if (randomWalkTimer) clearInterval(randomWalkTimer)
+      randomWalkTimer = null
+    })
   }
 
   // low-level client errors (e.g., PartialReadError) can be thrown without hitting bot.on('error')
@@ -343,14 +306,14 @@ function createBot() {
       isEating = false
       setActivity('eat-finished')
       safeLog('eat-finish', `Finished eating. (health=${bot.health?.toFixed?.(1) ?? '?'}, food=${bot.food ?? '?'})`, 0)
-      setAfkOn('Returned to /afk.', 1000)
+      setAfkOn('Returned to AFK.', 1000)
     }
     const onStop = () => {
       if (!isEating) return
       isEating = false
       setActivity('eat-stopped')
       safeLog('eat-stop', `Auto-eat stopped. (food=${bot.food ?? '?'})`, CONFIG.logThrottleMs.noFood)
-      if (!isAfk) setAfkOn('Returned to /afk.', 1000)
+      if (!isAfk) setAfkOn('Returned to AFK.', 1000)
     }
     const onError = (err) => {
       isEating = false
@@ -429,6 +392,7 @@ function createBot() {
     if (!force && t - lastRequestAt < CONFIG.foodRequestIntervalMs) return
     lastRequestAt = t
     const msg = pick(FOOD_REQUEST_MESSAGES)
+    if (!msg) return
     safeChat(msg)
     safeLog('food-request', `[${reason}] ${msg}`, CONFIG.logThrottleMs.noFood)
   }
@@ -441,7 +405,7 @@ function createBot() {
     if (requestMode) {
       setActivity('request-food')
       if (!isAfk) {
-        setAfkOn('Switched to /afk for request mode.')
+        setAfkOn('Switched to AFK for request mode.')
       }
 
       safeLog('request-start',
@@ -509,7 +473,7 @@ function createBot() {
 
         // ensure we go back to AFK if we were kicked out of it
         if (!isAfk) {
-          setAfkOn('Returned to /afk.', 1000)
+          setAfkOn('Returned to AFK.', 1000)
         }
       })
   }
@@ -535,19 +499,22 @@ function createBot() {
 
     if (!isEdible || !safe) {
       const tossed = await tossByName(itemName)
-      safeChat(`${pick(REJECTION_MESSAGES)} (${!isEdible ? 'not edible' : 'negative effects'}).`)
+      const msg = pick(REJECTION_MESSAGES)
+      if (msg) safeChat(`${msg} (${!isEdible ? 'not edible' : 'negative effects'}).`)
       safeLog('food-reject', `Rejected ${itemName}. Tossed=${tossed}.`, CONFIG.logThrottleMs.noFood)
       updateRequestMode('reject-food')
       return
     }
 
-    safeChat(pick(THANK_YOU_MESSAGES))
+    const thanks = pick(THANK_YOU_MESSAGES)
+    if (thanks) safeChat(thanks)
     safeLog('food-accept', `Accepted: ${itemName}.`, 0)
 
     const s = updateRequestMode('received-food')
     if (s.count < CONFIG.lowFoodThresholdItems) {
       // ONE message only, and reset request timer so timer won't instantly spam
-      safeChat(pick(NEED_MORE_MESSAGES))
+      const msg = pick(NEED_MORE_MESSAGES)
+      if (msg) safeChat(msg)
       lastRequestAt = now()
     } else {
       // also reset request timer after thanks to avoid immediate timer spam
@@ -559,13 +526,14 @@ function createBot() {
   bot.on('login', () => safeLog('login', 'Bot has logged in.', CONFIG.logThrottleMs.connection))
 
   bot.on('spawn', () => {
-    safeLog('spawn', `Spawned. /afk in ${CONFIG.afkDelay / 1000}s...`, CONFIG.logThrottleMs.connection)
+    safeLog('spawn', `Spawned. AFK in ${CONFIG.afkDelay / 1000}s...`, CONFIG.logThrottleMs.connection)
 
     if (!movements) {
       movements = new Movements(bot, bot.registry)
       configureMovementsNoBlockInteraction(movements)
       bot.pathfinder.setMovements(movements)
     }
+    startRandomWalk()
 
     // Configure auto-eat (newer plugin uses setOpts; fall back to legacy options field)
     const autoEatOpts = {
@@ -591,7 +559,7 @@ function createBot() {
     attachAutoEatEvents()
 
     setTimeout(() => {
-      setAfkOn('Chatted: /afk (AFK on).')
+      setAfkOn('AFK on after spawn.')
       updateRequestMode('spawn-afk')
     }, CONFIG.afkDelay)
 
