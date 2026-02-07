@@ -10,6 +10,10 @@ const { pathfinder, Movements, GoalBlock } = require('mineflayer-pathfinder')
 const { createLogger } = require('./logger')
 const { connection: CONNECTION, settings: CONFIG } = require('./config')
 
+/**
+ * Load custom chat message lists from JSON file.
+ * Falls back to empty arrays if file is missing or invalid.
+ */
 function loadMessages() {
   const filePath = path.resolve(__dirname, CONFIG.messagesPath || 'custom_messages/messages.json')
   const normalizeArray = (value) =>
@@ -52,6 +56,9 @@ const throttle = (() => {
   }
 })()
 
+/**
+ * Read ping from supported mineflayer internals across versions.
+ */
 function getPingMs(bot) {
   if (typeof bot?.player?.ping === 'number') return bot.player.ping
   if (typeof bot?._client?.ping === 'number') return bot._client.ping
@@ -60,6 +67,9 @@ function getPingMs(bot) {
 }
 
 
+/**
+ * Disable destructive block interactions for AFK safety.
+ */
 function disableBlockInteractions(bot, logger) {
   if (bot._afkBlockGuardsInstalled) return
   bot._afkBlockGuardsInstalled = true
@@ -79,10 +89,14 @@ function disableBlockInteractions(bot, logger) {
   }
 }
 
+/**
+ * Configure pathfinder movement flags to avoid digging/placing.
+ */
 function configureMovementsNoBlockInteraction(movements) {
   movements.canDig = false
   movements.canPlaceBlocks = false
-  // keep both spellings (different mineflayer versions)
+  // Keep multiple property names for compatibility across pathfinder versions.
+  movements.scaffoldingBlocks = []
   movements.scafoldingBlocks = []
   movements.scaffoldBlocks = []
 }
@@ -94,13 +108,20 @@ let offlineBackoffMs = CONFIG.offlineBackoffBaseMs
 let reconnectDisabledReason = null
 let throttledBackoffMs = CONFIG.throttledReconnectDelayMs
 
+/**
+ * Resolve reconnect delay from config with a safe default.
+ */
 const getReconnectDelayMs = () => {
   if (Number.isFinite(CONFIG.reconnectDelayMs)) return CONFIG.reconnectDelayMs
   return 3000
 }
 
+/**
+ * Schedule a single reconnect attempt (debounced by reconnectTimer).
+ */
 function scheduleReconnect(delay = getReconnectDelayMs(), opts = {}) {
   if (reconnectTimer) return
+  const safeDelay = Number.isFinite(delay) && delay >= 0 ? delay : getReconnectDelayMs()
   const { silent = false } = opts
   if (reconnectDisabledReason) {
     if (!silent) {
@@ -112,15 +133,18 @@ function scheduleReconnect(delay = getReconnectDelayMs(), opts = {}) {
   if (!silent) {
     const logger = createLogger({ name: 'AFK' })
     throttle('reconnect-log', CONFIG.logThrottleMs.connection, () =>
-      logger.log('reconnect', `Reconnecting in ${delay / 1000}s...`, CONFIG.logThrottleMs.connection)
+      logger.log('reconnect', `Reconnecting in ${safeDelay / 1000}s...`, CONFIG.logThrottleMs.connection)
     )
   }
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null
     attemptConnect('reconnect')
-  }, delay)
+  }, safeDelay)
 }
 
+/**
+ * Probe server status before connecting, supporting callback/promise ping APIs.
+ */
 function pingServerOnce() {
   const opts = {
     host: CONNECTION.host,
@@ -148,6 +172,9 @@ function pingServerOnce() {
   })
 }
 
+/**
+ * Connect workflow with optional pre-connect ping and offline backoff.
+ */
 async function attemptConnect(reason = 'startup') {
   if (reconnectDisabledReason) return
   if (!CONFIG.preConnectPing) {
@@ -173,6 +200,9 @@ async function attemptConnect(reason = 'startup') {
   }
 }
 
+/**
+ * Create bot instance, attach core handlers, and wire AFK/eat/request flows.
+ */
 function createBot() {
   if (currentBot) {
     try { currentBot.removeAllListeners(); currentBot.quit() } catch { }
@@ -200,7 +230,9 @@ function createBot() {
     scheduleReconnect()
   })
   bot.on('kicked', (reason) => {
-    const r = JSON.stringify(reason)
+    const r = typeof reason === 'string' ? reason : (() => {
+      try { return JSON.stringify(reason) } catch { return String(reason) }
+    })()
     const lower = r.toLowerCase()
     logger.log('kicked', `Kicked: ${r}`, 0)
     if (CONFIG.stopOnDuplicateLogin && (lower.includes('duplicate_login') || lower.includes('duplicate login'))) {
@@ -247,18 +279,34 @@ function createBot() {
 
   // chat cooldown to avoid double messages
   let lastChatAt = 0
+  /**
+   * Send chat with cooldown and runtime error protection.
+   */
   function safeChat(msg) {
     const t = now()
     if (!msg) return false
     if (t - lastChatAt < CONFIG.chatCooldownMs) return false
-    bot.chat(msg)
+    try {
+      bot.chat(msg)
+    } catch {
+      return false
+    }
     lastChatAt = t
     return true
   }
 
+  /**
+   * Track last high-level activity for status and high-ping diagnostics.
+   */
   const setActivity = (s) => { lastActivity = s || 'unknown' }
+  /**
+   * Log with key-based throttling to prevent console spam.
+   */
   const safeLog = (k, msg, ms = 0) => throttle(k, ms, () => logger.log(k, msg, ms))
 
+  /**
+   * Turn AFK mode on, optionally delayed.
+   */
   function setAfkOn(reason = 'AFK on.', delayMs = 0) {
     const apply = () => {
       if (isAfk) return
@@ -270,6 +318,9 @@ function createBot() {
     else apply()
   }
 
+  /**
+   * Turn AFK mode off.
+   */
   function setAfkOff(reason = 'AFK off.') {
     if (!isAfk) return
     isAfk = false
@@ -277,6 +328,9 @@ function createBot() {
   }
 
   let randomWalkTimer = null
+  /**
+   * Start small random walks to reduce idle-kick risk when enabled.
+   */
   function startRandomWalk() {
     if (!CONFIG.randomWalk?.enabled) return
     if (randomWalkTimer) return
@@ -318,6 +372,9 @@ function createBot() {
     })
   }
 
+  /**
+   * Register auto-eat event handlers for old and new plugin APIs.
+   */
   function attachAutoEatEvents() {
     if (bot._afkAutoEatEventsInstalled) return
     bot._afkAutoEatEventsInstalled = true
@@ -363,6 +420,9 @@ function createBot() {
     bot.on('autoeat_error', onError)
   }
 
+  /**
+   * Refresh set of negative potion effect IDs from the active registry.
+   */
   function refreshNegativeEffectIds() {
     negativeEffectIds.clear()
     const effectsByName = bot.registry?.effectsByName ?? {}
@@ -372,6 +432,9 @@ function createBot() {
     }
   }
 
+  /**
+   * Check whether a food definition includes configured negative effects.
+   */
   function foodHasNegativeEffects(foodInfo) {
     for (const eff of (foodInfo?.effects ?? [])) {
       const id = eff?.effect
@@ -380,6 +443,9 @@ function createBot() {
     return false
   }
 
+  /**
+   * Determine whether an item name is edible and safe for auto-eat.
+   */
   function isSafeEdible(name) {
     const foods = bot.registry?.foodsByName ?? null
     if (!foods?.[name]) return false
@@ -387,6 +453,9 @@ function createBot() {
     return !foodHasNegativeEffects(foods[name])
   }
 
+  /**
+   * Build a summary of safe edible items currently in inventory.
+   */
   function safeFoodSummary() {
     const items = bot.inventory?.items?.() ?? []
     const foods = bot.registry?.foodsByName ?? null
@@ -410,10 +479,16 @@ function createBot() {
     return { count, top }
   }
 
+  /**
+   * Stop any ongoing pathfinder movement.
+   */
   function stopAllMovement() {
     try { bot.pathfinder?.stop(); bot.pathfinder?.setGoal(null) } catch { }
   }
 
+  /**
+   * Send one food request chat line (rate-limited unless forced).
+   */
   function sendFoodRequest(reason = 'low-food', force = false) {
     if (!requestMode && !force) return
     const t = now()
@@ -425,6 +500,9 @@ function createBot() {
     safeLog('food-request', `[${reason}] ${msg}`, CONFIG.logThrottleMs.noFood)
   }
 
+  /**
+   * Enter or exit low-food request mode.
+   */
   function setRequestMode(on, reason, foodCount) {
     if (on === requestMode) return
     requestMode = on
@@ -457,6 +535,9 @@ function createBot() {
     }
   }
 
+  /**
+   * Recompute inventory summary and synchronize request mode state.
+   */
   function updateRequestMode(reason) {
     const s = safeFoodSummary()
     lastKnownFoodCount = s.count
@@ -465,6 +546,9 @@ function createBot() {
   }
 
   // Catch autoEat timeout + backoff
+  /**
+   * Trigger one guarded eat attempt with cooldown and failure backoff.
+   */
   function tryEat(reason) {
     const t = now()
 
@@ -475,6 +559,11 @@ function createBot() {
 
     lastEatAttemptAt = t
     setActivity('eat-attempt')
+
+    if (!bot.autoEat || typeof bot.autoEat.eat !== 'function') {
+      safeLog('eat-unavailable', 'Auto-eat plugin unavailable; cannot eat now.', CONFIG.logThrottleMs.noFood)
+      return
+    }
 
     const inv = safeFoodSummary()
     if (!inv.count) {
@@ -506,12 +595,18 @@ function createBot() {
       })
   }
 
+  /**
+   * Toss one inventory stack by item name.
+   */
   async function tossByName(name) {
     const stack = bot.inventory?.items?.().find(it => it.name === name)
     if (!stack) return false
     try { await bot.tossStack(stack); return true } catch { return false }
   }
 
+  /**
+   * Handle picked-up items: accept safe food, reject unsafe/non-food items.
+   */
   async function handleCollectedItem(collectedEntity) {
     const dropped = typeof collectedEntity.getDroppedItem === 'function'
       ? collectedEntity.getDroppedItem()
@@ -574,11 +669,15 @@ function createBot() {
       bannedFood: CONFIG.bannedFood,
       eatingTimeout: CONFIG.eatTimeoutMs
     }
-    if (typeof bot.autoEat?.setOpts === 'function') bot.autoEat.setOpts(autoEatOpts)
-    else bot.autoEat.options = {
-      ...autoEatOpts,
-      startAt: CONFIG.hungerThreshold,
-      timeout: CONFIG.eatTimeoutMs
+    if (bot.autoEat) {
+      if (typeof bot.autoEat.setOpts === 'function') bot.autoEat.setOpts(autoEatOpts)
+      else bot.autoEat.options = {
+        ...autoEatOpts,
+        startAt: CONFIG.hungerThreshold,
+        timeout: CONFIG.eatTimeoutMs
+      }
+    } else {
+      safeLog('eat-plugin-missing', 'Auto-eat plugin not available after loadPlugin(autoEat).', CONFIG.logThrottleMs.connection)
     }
 
     refreshNegativeEffectIds()

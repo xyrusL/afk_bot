@@ -1,7 +1,13 @@
+/**
+ * Build a lightweight console logger with per-key duplicate suppression.
+ */
 function createLogger(options = {}) {
     const name = options.name ? String(options.name) : 'AFK'
     const lastByKey = new Map()
 
+    /**
+     * Format local time as HH:MM:SS for compact log prefixes.
+     */
     function stamp() {
         const d = new Date()
         const hh = String(d.getHours()).padStart(2, '0')
@@ -10,6 +16,9 @@ function createLogger(options = {}) {
         return `${hh}:${mm}:${ss}`
     }
 
+    /**
+     * Emit one log entry and suppress repeated identical messages within interval.
+     */
     function emit(level, key, message, minIntervalMs = 0) {
         const now = Date.now()
         const prev = key ? lastByKey.get(key) : undefined
