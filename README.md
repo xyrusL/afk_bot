@@ -106,7 +106,3 @@ If a message list is empty, the bot simply won't send that type of message.
 ## 📄 License
 
 [MIT](./LICENSE) — free to use, modify, and share.
-
----
-
-*© DEZE — Built with ❤️ and a little help from AI*
