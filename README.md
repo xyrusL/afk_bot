@@ -1,154 +1,68 @@
-# Mineflayer AFK Bot
+# 🤖 Minecraft AFK Bot
 
-A Minecraft AFK bot built with Mineflayer that keeps you online, manages hunger safely, and reconnects when disconnected.
-
----
-
-## Features
-
-### Auto-AFK and Reconnect
-- Sends an AFK command after spawn (configurable, can be disabled)
-- Reconnects on kick, error, or disconnect
-- Handles throttled kick reconnects with an extended delay
-- Detects low-level client read errors and reconnects
-- Pre-connect server ping with retry backoff when offline
-
-### Hunger Management
-- Eats when hunger or health is low (configurable thresholds)
-- Safe food filter (banned items plus negative effects)
-- Configurable eating timeout and retry backoff
-
-### Food Request System
-- Enters request mode when safe food runs low
-- Sends periodic food requests in chat
-- Accepts safe food with thank-you messages
-- Rejects unsafe food and discards it
-
-### Ping Monitoring
-- Tracks ping and logs NORMAL/HIGH states using a strike system
-
-### Safety and Stability
-- Digging and block placement disabled
-- Optional random walking (disabled by default)
-- Throttled logs to reduce spam
-
-### Status Heartbeat
-- Periodic status logs for AFK state, health, food, ping, and request/eat state
+A smart, self-managing bot that keeps your Minecraft account online — even when you're away. It handles hunger, reconnects by itself, and asks for help when it needs food. Just set it up and let it run.
 
 ---
 
-## Configuration
+## ✨ What It Does
 
-Edit `config.js` to change connection settings and behavior:
+### 🟢 Stays Online Automatically
+The bot connects to your server and goes AFK right away. If it ever gets disconnected — whether by a kick, a crash, or a timeout — it reconnects on its own without you having to do anything.
 
-```javascript
-module.exports = {
-  connection: {
-    host: 'your.server.ip',
-    port: 25565,
-    username: '_AfkBot',
-    version: false // Auto-detect, or specify like '1.20.4'
-  },
-  settings: {
-    afkCommand: '/afk',
-    sendAfkChat: true,
-    randomWalk: { enabled: false, intervalMs: 15000, radius: 6 },
-    messagesPath: 'custom_messages/messages.json'
-  }
+### 🍎 Eats When Hungry
+When the bot's hunger or health gets low, it automatically eats food from its inventory. It's smart about it too — it only eats safe food and avoids anything harmful like rotten flesh or poisonous potatoes.
+
+### 🙋 Asks for Food When It Runs Out
+If the bot runs low on food, it switches into "request mode" and politely asks players in chat for more. When someone gives it food, it checks if it's safe — thanks them if it is, or throws it away if it isn't.
+
+### 📡 Monitors Its Connection
+The bot tracks its ping to the server and logs when the connection is slow. It also checks if the server is online before trying to connect, and backs off slowly if the server is down — so it doesn't spam reconnects.
+
+### 🛡️ Safe by Design
+The bot can't dig blocks or place them. It won't accidentally grief your world. It's built to be passive — just staying alive and online.
+
+---
+
+## ⚙️ Setup
+
+### What You Need
+- [Node.js](https://nodejs.org/) v16 or higher
+
+### First Time
+```bash
+npm install
+```
+
+### Configure It
+Open `config.js` and fill in your server details:
+
+```js
+connection: {
+  host: 'your.server.ip',  // Server address
+  port: 25565,              // Server port
+  username: '_AfkBot',      // Bot's Minecraft username
+  version: false            // Auto-detect version, or set manually e.g. '1.20.4'
 }
 ```
 
-### Advanced Settings (config.js)
-
-Key settings you can tune inside `settings`:
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `afkDelay` | 3000ms | Delay before sending `/afk` after spawn |
-| `reconnectDelayMs` | 3000ms | Delay before reconnecting after disconnect |
-| `stopOnDuplicateLogin` | true | Stop reconnecting after duplicate login kicks |
-| `throttledReconnectDelayMs` | 30000ms | Initial delay after throttled reconnect kicks |
-| `throttledReconnectMaxMs` | 120000ms | Max delay for throttled reconnect backoff |
-| `afkCommand` | `/afk` | Chat command used to toggle AFK |
-| `sendAfkChat` | true | If false, no AFK command is sent |
-| `randomWalk.enabled` | false | Enable random walking |
-| `randomWalk.intervalMs` | 15000ms | Time between random walk goals |
-| `randomWalk.radius` | 6 | Block radius for random walk targets |
-| `hungerThreshold` | 10 | Hunger level to trigger eating |
-| `healthThreshold` | 10 | Health level to trigger emergency eating |
-| `eatTimeoutMs` | 9000ms | Timeout for a single eating action |
-| `eatBackoffOnFailMs` | 7000ms | Backoff after a failed eat attempt |
-| `preConnectPing` | true | Ping server before connecting |
-| `pingTimeoutMs` | 2000ms | Timeout for the pre-connect ping |
-| `offlineBackoffBaseMs` | 5000ms | Initial retry delay when server is offline |
-| `offlineBackoffMaxMs` | 60000ms | Max retry delay when server stays offline |
-| `lowFoodThresholdItems` | 6 | Safe food count to trigger request mode |
-| `foodRequestIntervalMs` | 45000ms | Time between food request messages |
-| `chatCooldownMs` | 1500ms | Minimum gap between chat messages |
-| `statusIntervalMs` | 60000ms | Time between status heartbeat logs |
-| `pingCheckIntervalMs` | 5000ms | Ping check interval |
-| `highPingThresholdMs` | 250ms | Ping threshold for HIGH mode |
-| `highPingStrikes` | 3 | Strikes to enter HIGH mode |
-| `highPingRecoveryStrikes` | 3 | Strikes to exit HIGH mode |
+### Run It
+```bash
+npm start
+```
 
 ---
 
-## Custom Messages
+## 📱 Running on Android (Termux)
 
-Edit `custom_messages/messages.json` to change chat lines for food requests, thank-you messages, rejections, and follow-ups. If a list is empty, the bot won't send that message type.
+You can even run this on your phone!
 
----
-
-## Offline Behavior
-
-When `preConnectPing` is enabled, the bot pings the server before connecting. If the ping fails (server offline or unreachable), it waits and retries using an exponential backoff up to `offlineBackoffMaxMs`. If the server blocks status pings, the bot will treat it as offline until a ping succeeds.
-
----
-
-## Connection Kicks
-
-If the server kicks for `duplicate_login` and `stopOnDuplicateLogin` is true, the bot stops reconnecting to avoid repeated kicks. If the server says "Connection throttled", the bot waits longer between reconnect attempts using `throttledReconnectDelayMs` up to `throttledReconnectMaxMs`.
-
----
-
-## Dependencies
-
-- `mineflayer`
-- `mineflayer-auto-eat`
-- `mineflayer-pathfinder`
-
----
-
-## How to Run (PC)
-
-1. Install Node.js (v16+ recommended)
-2. Open a terminal in the bot folder
-3. Install dependencies (first time only):
-   ```bash
-   npm install
-   ```
-4. Configure the bot by editing `config.js`
-5. Start the bot:
-   ```bash
-   npm start
-   ```
-
----
-
-## How to Run on Android (Termux)
-
-1. Install Termux from F-Droid
-2. Set up the environment:
+1. Install [Termux from F-Droid](https://f-droid.org/packages/com.termux/)
+2. Run:
    ```bash
    pkg update && pkg upgrade -y
    pkg install nodejs -y
    ```
-3. Enable storage access and navigate to the download folder:
-   ```bash
-   termux-setup-storage
-   cd storage/downloads/afk_bot
-   ```
-4. Install dependencies and run:
+3. Navigate to the bot folder and run:
    ```bash
    npm install
    npm start
@@ -156,21 +70,43 @@ If the server kicks for `duplicate_login` and `stopOnDuplicateLogin` is true, th
 
 ---
 
-## Log Messages Reference
+## 🔧 Configuration Options
 
-| Log Key | Description |
-|---------|-------------|
-| `connect` | Connecting to server |
-| `spawn` | Bot spawned in world |
-| `afk-on/off` | AFK mode toggled |
-| `eat-*` | Eating-related events |
-| `food-*` | Food inventory/request events |
-| `ping-*` | Ping status changes |
-| `heartbeat` | Periodic status update |
-| `kicked/error/end` | Disconnect events |
+All settings live in `config.js`. Here are the key ones:
+
+| Setting | Default | What It Does |
+|---|---|---|
+| `afkCommand` | `/afk` | The command sent to toggle AFK mode |
+| `sendAfkChat` | `true` | Set to `false` to disable the AFK command |
+| `randomWalk.enabled` | `false` | Make the bot walk around randomly to avoid idle kicks |
+| `hungerThreshold` | `10` | Hunger level that triggers eating |
+| `healthThreshold` | `10` | Health level that triggers emergency eating |
+| `lowFoodThresholdItems` | `6` | How few food items triggers food request mode |
+| `reconnectDelayMs` | `3000ms` | How long to wait before reconnecting |
+| `preConnectPing` | `true` | Ping the server before connecting |
 
 ---
 
-## License
+## 💬 Custom Messages
 
-ISC
+The bot sends chat messages when it needs food, receives food, or rejects unsafe food. You can customize all of these in `custom_messages/messages.json`.
+
+If a message list is empty, the bot simply won't send that type of message.
+
+---
+
+## 📦 Built With
+
+- [mineflayer](https://github.com/PrismarineJS/mineflayer) — Minecraft bot framework
+- [mineflayer-auto-eat](https://github.com/link-discord/mineflayer-auto-eat) — Automatic eating
+- [mineflayer-pathfinder](https://github.com/PrismarineJS/mineflayer-pathfinder) — Movement and navigation
+
+---
+
+## 📄 License
+
+[MIT](./LICENSE) — free to use, modify, and share.
+
+---
+
+*© DEZE — Built with ❤️ and a little help from AI*
